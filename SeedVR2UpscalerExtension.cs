@@ -13,6 +13,7 @@ using SixLabors.ImageSharp.Formats.Jpeg;
 using SixLabors.ImageSharp.Formats.Tiff;
 using SwarmUI.Utils;
 using ISImage = SixLabors.ImageSharp.Image;
+using Image = SwarmUI.Utils.Image;
 
 namespace SeedVR2Upscaler;
 
@@ -728,6 +729,9 @@ public class SeedVR2UpscalerExtension : Extension
                 sourceImage = ImageFile.FromDataString(imageFile);
                 (origWidth, origHeight) = sourceImage.GetResolution();
                 Logs.Info($"SeedVR2 Image File: Data URL source dimensions {origWidth}x{origHeight}");
+
+                // Preserve original image metadata from data URL
+                ApplySourceImageMetadata(sourceImage, g.UserInput);
             }
             catch (Exception ex)
             {
@@ -787,6 +791,10 @@ public class SeedVR2UpscalerExtension : Extension
             {
                 Logs.Warning($"SeedVR2 Image File: Could not read image dimensions: {ex.Message}");
             }
+
+            // Preserve original image metadata - load source params and apply to input
+            // This ensures the output has the original generation params, not current UI values
+            ApplySourceImageMetadata(imageFile, g.UserInput);
         }
 
         // Determine model variant and settings from SeedVR2Model parameter
@@ -1651,6 +1659,102 @@ public class SeedVR2UpscalerExtension : Extension
             Logs.Debug($"SeedVR2: Could not extract source EXIF: {ex.Message}");
             return null;
         }
+    }
+
+    /// <summary>Set of SeedVR2 parameter IDs that should be preserved from the current request, not overwritten by source metadata.</summary>
+    /// <remarks>IDs are cleaned by T2IParamTypes.CleanTypeName which keeps only lowercase letters.</remarks>
+    private static readonly HashSet<string> SeedVR2ParamIds =
+    [
+        "seedvrmodel", "seedvrupscaleby", "seedvrresolution", "seedvrblockswap",
+        "seedvrcolorcorrection", "seedvrtwostepmode", "seedvrpredownscale", "seedvrtiledvae",
+        "seedvrlatentnoisescale", "seedvrinputnoisescale", "seedvrcachemodel", "seedvrattentionmode",
+        "seedvrvaeoffloaddevice", "seedvrvideobatchsize", "seedvrtemporaloverlap", "seedvruniformbatchsize",
+        "seedvrvideofile", "seedvrimagefile"
+    ];
+
+    /// <summary>Applies source image metadata to the user input, preserving original generation params.</summary>
+    /// <remarks>
+    /// For file upscaling, the output should preserve the original image's generation metadata (prompt, model, etc.)
+    /// instead of using the current UI values. Only SeedVR2-specific params are kept from the current request.
+    /// </remarks>
+    /// <param name="imagePath">The path to the source image file.</param>
+    /// <param name="input">The user input to modify.</param>
+    private static void ApplySourceImageMetadata(string imagePath, T2IParamInput input)
+    {
+        try
+        {
+            byte[] imageBytes = System.IO.File.ReadAllBytes(imagePath);
+            string extension = System.IO.Path.GetExtension(imagePath).TrimStart('.').ToLowerInvariant();
+            MediaType mediaType = MediaType.GetByExtension(extension) ?? MediaType.ImagePng;
+            ImageFile imageFile = new Image(imageBytes, mediaType);
+            ApplySourceImageMetadataCore(imageFile, input);
+        }
+        catch (Exception ex)
+        {
+            Logs.Debug($"SeedVR2: Could not load source image metadata from file: {ex.Message}");
+        }
+    }
+
+    /// <summary>Applies source image metadata to the user input from an ImageFile object.</summary>
+    /// <param name="sourceImage">The source image.</param>
+    /// <param name="input">The user input to modify.</param>
+    private static void ApplySourceImageMetadata(ImageFile sourceImage, T2IParamInput input)
+    {
+        try
+        {
+            ApplySourceImageMetadataCore(sourceImage, input);
+        }
+        catch (Exception ex)
+        {
+            Logs.Debug($"SeedVR2: Could not load source image metadata from data URL: {ex.Message}");
+        }
+    }
+
+    /// <summary>Core implementation for applying source image metadata.</summary>
+    private static void ApplySourceImageMetadataCore(ImageFile sourceImage, T2IParamInput input)
+    {
+        JObject sourceParams = sourceImage.GetSUIMetadata();
+        if (sourceParams is null || sourceParams.Count == 0)
+        {
+            Logs.Info("SeedVR2 Metadata: No source metadata found in image, using current UI values");
+            return;
+        }
+
+        int appliedCount = 0;
+        foreach (JProperty prop in sourceParams.Properties())
+        {
+            // Use the same normalization as T2IParamTypes.CleanTypeName (lowercase letters only)
+            string paramId = T2IParamTypes.CleanTypeName(prop.Name);
+
+            // Skip SeedVR2 params - we want to use current request values for those
+            if (SeedVR2ParamIds.Contains(paramId))
+            {
+                continue;
+            }
+
+            // Skip if no param type exists for this ID
+            if (!T2IParamTypes.TryGetType(prop.Name, out T2IParamType paramType, input))
+            {
+                continue;
+            }
+
+            // Apply the original value to the input
+            try
+            {
+                string valueStr = prop.Value?.ToString();
+                if (!string.IsNullOrEmpty(valueStr))
+                {
+                    input.Set(paramType, valueStr);
+                    appliedCount++;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logs.Debug($"SeedVR2 Metadata: Could not apply param '{prop.Name}': {ex.Message}");
+            }
+        }
+
+        Logs.Info($"SeedVR2 Metadata: Applied {appliedCount} original params from source image");
     }
 
     /// <summary>Handles PostGenerateEvent - currently unused but reserved for future enhancements.</summary>
