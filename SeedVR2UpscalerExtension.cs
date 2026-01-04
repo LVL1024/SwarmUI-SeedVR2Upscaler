@@ -1,11 +1,18 @@
+using System.Collections.Concurrent;
 using System.Linq;
 using FreneticUtilities.FreneticExtensions;
 using Newtonsoft.Json.Linq;
 using SwarmUI.Accounts;
 using SwarmUI.Builtin_ComfyUIBackend;
 using SwarmUI.Core;
+using SwarmUI.Media;
 using SwarmUI.Text2Image;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Metadata.Profiles.Exif;
+using SixLabors.ImageSharp.Formats.Jpeg;
+using SixLabors.ImageSharp.Formats.Tiff;
 using SwarmUI.Utils;
+using ISImage = SixLabors.ImageSharp.Image;
 
 namespace SeedVR2Upscaler;
 
@@ -92,6 +99,9 @@ public class SeedVR2UpscalerExtension : Extension
         ["seedvr2-preset-quality"] = ("seedvr2-7b-fp8", 16, true),
         ["seedvr2-preset-max"] = ("seedvr2-7b-sharp-fp16", 0, false),
     };
+
+    /// <summary>Temporary storage for source EXIF profiles, keyed by request ID. Avoids serialization into image metadata.</summary>
+    private static readonly ConcurrentDictionary<long, byte[]> PendingSourceExif = new();
 
     /// <inheritdoc/>
     public override void OnPreInit()
@@ -367,7 +377,18 @@ public class SeedVR2UpscalerExtension : Extension
         // Uses ReplaceNodeConnection to update the existing save node to use upscaled frames
         WorkflowGenerator.AddStep(GenerateSeedVR2VideoGenerationWorkflow, 15);
 
+        // Register event handlers for EXIF metadata preservation
+        T2IEngine.PostGenerateEvent += HandleSeedVR2PostGeneration;
+        T2IEngine.PostBatchEvent += HandleSeedVR2PostBatch;
+
         Logs.Info("SeedVR2 Upscaler Extension loaded successfully.");
+    }
+
+    /// <inheritdoc/>
+    public override void OnShutdown()
+    {
+        T2IEngine.PostGenerateEvent -= HandleSeedVR2PostGeneration;
+        T2IEngine.PostBatchEvent -= HandleSeedVR2PostBatch;
     }
 
     /// <summary>Detects available GPU VRAM and returns the best model configuration.</summary>
@@ -677,7 +698,18 @@ public class SeedVR2UpscalerExtension : Extension
             return;
         }
 
-        Logs.Info($"SeedVR2 Image File Mode: Processing image '{imageFile}'");
+        // Check if this is a data URL (drag & dropped image) or a file path
+        bool isDataUrl = imageFile.StartsWith("data:");
+        ImageFile sourceImage = null;
+
+        if (isDataUrl)
+        {
+            Logs.Info($"SeedVR2 Image File Mode: Processing data URL image");
+        }
+        else
+        {
+            Logs.Info($"SeedVR2 Image File Mode: Processing image '{imageFile}'");
+        }
 
         // Verify feature is available
         if (!g.Features.Contains("seedvr2_upscaler"))
@@ -685,57 +717,76 @@ public class SeedVR2UpscalerExtension : Extension
             throw new SwarmUserErrorException("SeedVR2 Image File upscaling requires SeedVR2 nodes. Please install the ComfyUI-SeedVR2_VideoUpscaler custom node.");
         }
 
-        // Expand path (support ~ for home directory)
-        if (imageFile.StartsWith("~/"))
-        {
-            imageFile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + imageFile[1..];
-        }
+        // Get image dimensions to calculate upscaled resolution
+        int origWidth = 0, origHeight = 0;
 
-        // Resolve Output/ or View/ paths to actual file system paths using user's output directory
-        User user = g.UserInput.SourceSession?.User;
-        if (user is not null)
+        if (isDataUrl)
         {
-            string relativePath = null;
-            if (imageFile.StartsWith("Output/"))
+            // Parse the data URL into an ImageFile
+            try
             {
-                relativePath = imageFile["Output/".Length..];
+                sourceImage = ImageFile.FromDataString(imageFile);
+                (origWidth, origHeight) = sourceImage.GetResolution();
+                Logs.Info($"SeedVR2 Image File: Data URL source dimensions {origWidth}x{origHeight}");
             }
-            else if (imageFile.StartsWith("View/"))
+            catch (Exception ex)
             {
-                // View/{user_id}/path format - strip View/{user_id}/ prefix
-                string afterView = imageFile["View/".Length..];
-                int slashIndex = afterView.IndexOf('/');
-                if (slashIndex > 0)
+                throw new SwarmUserErrorException($"SeedVR2 Image File: Could not parse data URL: {ex.Message}");
+            }
+        }
+        else
+        {
+            // Expand path (support ~ for home directory)
+            if (imageFile.StartsWith("~/"))
+            {
+                imageFile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + imageFile[1..];
+            }
+
+            // Resolve Output/ or View/ paths to actual file system paths using user's output directory
+            User user = g.UserInput.SourceSession?.User;
+            if (user is not null)
+            {
+                string relativePath = null;
+                if (imageFile.StartsWith("Output/"))
                 {
-                    relativePath = afterView[(slashIndex + 1)..];
+                    relativePath = imageFile["Output/".Length..];
+                }
+                else if (imageFile.StartsWith("View/"))
+                {
+                    // View/{user_id}/path format - strip View/{user_id}/ prefix
+                    string afterView = imageFile["View/".Length..];
+                    int slashIndex = afterView.IndexOf('/');
+                    if (slashIndex > 0)
+                    {
+                        relativePath = afterView[(slashIndex + 1)..];
+                    }
+                }
+
+                if (relativePath is not null)
+                {
+                    string root = Utilities.CombinePathWithAbsolute(Environment.CurrentDirectory, user.OutputDirectory);
+                    imageFile = UserImageHistoryHelper.GetRealPathFor(user, $"{root}/{relativePath}", root: root);
                 }
             }
 
-            if (relativePath is not null)
+            // Validate the file exists
+            if (!System.IO.File.Exists(imageFile))
             {
-                string root = Utilities.CombinePathWithAbsolute(Environment.CurrentDirectory, user.OutputDirectory);
-                imageFile = UserImageHistoryHelper.GetRealPathFor(user, $"{root}/{relativePath}", root: root);
+                throw new SwarmUserErrorException($"SeedVR2 Image File not found: {imageFile}");
             }
-        }
 
-        // Validate the file exists
-        if (!System.IO.File.Exists(imageFile))
-        {
-            throw new SwarmUserErrorException($"SeedVR2 Image File not found: {imageFile}");
-        }
-
-        // Get image dimensions to calculate upscaled resolution
-        int origWidth = 0, origHeight = 0;
-        try
-        {
-            using var image = SixLabors.ImageSharp.Image.Load(imageFile);
-            origWidth = image.Width;
-            origHeight = image.Height;
-            Logs.Info($"SeedVR2 Image File: Source dimensions {origWidth}x{origHeight}");
-        }
-        catch (Exception ex)
-        {
-            Logs.Warning($"SeedVR2 Image File: Could not read image dimensions: {ex.Message}");
+            // Get image dimensions from file
+            try
+            {
+                using ISImage image = ISImage.Load(imageFile);
+                origWidth = image.Width;
+                origHeight = image.Height;
+                Logs.Info($"SeedVR2 Image File: Source dimensions {origWidth}x{origHeight}");
+            }
+            catch (Exception ex)
+            {
+                Logs.Warning($"SeedVR2 Image File: Could not read image dimensions: {ex.Message}");
+            }
         }
 
         // Determine model variant and settings from SeedVR2Model parameter
@@ -832,13 +883,39 @@ public class SeedVR2UpscalerExtension : Extension
 
         // === Create workflow nodes ===
 
-        // 1. LoadImage node - load the existing image file
-        string loadImageNode = g.CreateNode("LoadImage", new JObject()
+        // 1. Load the image - use CreateLoadImageNode for data URLs (supports SwarmLoadImageB64),
+        //    or LoadImage for file paths
+        string loadImageNode;
+        if (isDataUrl && sourceImage is not null)
         {
-            ["image"] = imageFile
-        });
+            // Use SwarmUI's CreateLoadImageNode which handles base64 images via SwarmLoadImageB64
+            loadImageNode = g.CreateLoadImageNode(sourceImage, "${seedvr2_source_image}", false);
+        }
+        else
+        {
+            // Use ComfyUI's LoadImage for file paths
+            loadImageNode = g.CreateNode("LoadImage", new JObject()
+            {
+                ["image"] = imageFile
+            });
+        }
 
-        // 2. SeedVR2LoadDiTModel - load the upscaler model
+        // 2. Add VRAM cleanup node to unload any existing models before SeedVR2
+        // This frees up VRAM so SeedVR2 has enough room to load its models
+        JArray loadedImageOutput = new JArray() { loadImageNode, 0 };
+        if (g.Features.Contains("kjnodes"))
+        {
+            string vramCleanupNode = g.CreateNode("VRAM_Debug", new JObject()
+            {
+                ["empty_cache"] = true,
+                ["gc_collect"] = true,
+                ["unload_all_models"] = true,
+                ["image_pass"] = loadedImageOutput
+            });
+            loadedImageOutput = new JArray() { vramCleanupNode, 1 };  // output index 1 is image_pass
+        }
+
+        // 3. SeedVR2LoadDiTModel - load the upscaler model
         JObject ditLoaderInputs = new JObject()
         {
             ["model"] = ditModel,
@@ -851,7 +928,7 @@ public class SeedVR2UpscalerExtension : Extension
         };
         string ditLoaderNode = g.CreateNode("SeedVR2LoadDiTModel", ditLoaderInputs);
 
-        // 3. SeedVR2LoadVAEModel - load VAE with optional tiling
+        // 4. SeedVR2LoadVAEModel - load VAE with optional tiling
         JObject vaeLoaderInputs = new JObject()
         {
             ["model"] = "ema_vae_fp16.safetensors",
@@ -870,11 +947,11 @@ public class SeedVR2UpscalerExtension : Extension
         }
         string vaeLoaderNode = g.CreateNode("SeedVR2LoadVAEModel", vaeLoaderInputs);
 
-        // 4. Get seed from user input
+        // 5. Get seed from user input
         long seed = g.UserInput.Get(T2IParamTypes.Seed, 42);
 
-        // 5. Optional 2-Step Mode: Downscale the image first
-        JArray imageInputForUpscaler = new JArray() { loadImageNode, 0 };
+        // 6. Optional 2-Step Mode: Downscale the image first
+        JArray imageInputForUpscaler = loadedImageOutput;
         if (twoStepMode)
         {
             string downscaleNode = g.CreateNode("ImageScaleBy", new JObject()
@@ -910,17 +987,62 @@ public class SeedVR2UpscalerExtension : Extension
         // 7. Set FinalImageOut
         g.FinalImageOut = new JArray() { upscalerNode, 0 };
 
-        // 8. Create SaveImage node since we're skipping further steps
-        g.CreateNode("SaveImage", new JObject()
+        // 8. Extract source EXIF before replacing data URL (for EXIF preservation)
+        // Store in static dictionary (not ExtraMeta) to avoid serialization into image metadata
+        long requestId = g.UserInput.UserRequestId;
+        if (isDataUrl && sourceImage is not null)
         {
-            ["images"] = g.FinalImageOut,
-            ["filename_prefix"] = "SeedVR2_upscaled"
-        });
+            try
+            {
+                ExifProfile sourceExif = sourceImage.ToIS.Metadata.ExifProfile;
+                if (sourceExif is not null && sourceExif.Values.Any())
+                {
+                    PendingSourceExif[requestId] = sourceExif.ToByteArray();
+                    Logs.Info($"SeedVR2 EXIF: Captured {sourceExif.Values.Count()} tags from data URL (request {requestId})");
+                }
+                else
+                {
+                    Logs.Info($"SeedVR2 EXIF: No EXIF data found in data URL source image");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logs.Debug($"SeedVR2: Could not extract EXIF from data URL: {ex.Message}");
+            }
+            // Clear data URL from metadata (data URLs are huge and shouldn't be stored)
+            g.UserInput.Set(SeedVR2ImageFile, "[data URL image]");
+        }
+        else if (!isDataUrl)
+        {
+            // Extract EXIF from file path
+            try
+            {
+                using ISImage sourceImg = ISImage.Load(imageFile);
+                ExifProfile sourceExif = sourceImg.Metadata.ExifProfile;
+                if (sourceExif is not null && sourceExif.Values.Any())
+                {
+                    PendingSourceExif[requestId] = sourceExif.ToByteArray();
+                    Logs.Info($"SeedVR2 EXIF: Captured {sourceExif.Values.Count()} tags from file (request {requestId})");
+                }
+                else
+                {
+                    Logs.Info($"SeedVR2 EXIF: No EXIF data found in source file {imageFile}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logs.Debug($"SeedVR2: Could not extract EXIF from file: {ex.Message}");
+            }
+        }
+
+        // 9. Create save node using proper SwarmUI method for metadata handling (fixes issue #12)
+        g.CreateImageSaveNode(g.FinalImageOut);
 
         // Mark workflow as complete - skip all other generation steps
         g.SkipFurtherSteps = true;
 
-        Logs.Info($"SeedVR2 Image File: Complete workflow created - loading '{imageFile}', upscaling {seedvrUpscaleBy}x to resolution {resolution}");
+        string sourceDesc = isDataUrl ? "data URL image" : $"'{imageFile}'";
+        Logs.Info($"SeedVR2 Image File: Complete workflow created - loading {sourceDesc}, upscaling {seedvrUpscaleBy}x to resolution {resolution}");
     }
 
     /// <summary>Generates SeedVR2 workflow for upscaling existing video files.</summary>
@@ -1082,7 +1204,22 @@ public class SeedVR2UpscalerExtension : Extension
             ["file"] = videoFile
         });
 
-        // 2. SeedVR2LoadDiTModel - load the upscaler model
+        // 2. Add VRAM cleanup node to unload any existing models before SeedVR2
+        // This frees up VRAM so SeedVR2 has enough room to load its models
+        JArray loadedVideoFrames = new JArray() { loadVideoNode, 0 };
+        if (g.Features.Contains("kjnodes"))
+        {
+            string vramCleanupNode = g.CreateNode("VRAM_Debug", new JObject()
+            {
+                ["empty_cache"] = true,
+                ["gc_collect"] = true,
+                ["unload_all_models"] = true,
+                ["image_pass"] = loadedVideoFrames
+            });
+            loadedVideoFrames = new JArray() { vramCleanupNode, 1 };  // output index 1 is image_pass
+        }
+
+        // 3. SeedVR2LoadDiTModel - load the upscaler model
         JObject ditLoaderInputs = new JObject()
         {
             ["model"] = ditModel,
@@ -1095,7 +1232,7 @@ public class SeedVR2UpscalerExtension : Extension
         };
         string ditLoaderNode = g.CreateNode("SeedVR2LoadDiTModel", ditLoaderInputs);
 
-        // 3. SeedVR2LoadVAEModel - load VAE with optional tiling
+        // 4. SeedVR2LoadVAEModel - load VAE with optional tiling
         JObject vaeLoaderInputs = new JObject()
         {
             ["model"] = "ema_vae_fp16.safetensors",
@@ -1114,13 +1251,13 @@ public class SeedVR2UpscalerExtension : Extension
         }
         string vaeLoaderNode = g.CreateNode("SeedVR2LoadVAEModel", vaeLoaderInputs);
 
-        // 4. Get seed from user input
+        // 5. Get seed from user input
         long seed = g.UserInput.Get(T2IParamTypes.Seed, 42);
 
-        // 5. SeedVR2VideoUpscaler - upscale the video frames
+        // 6. SeedVR2VideoUpscaler - upscale the video frames
         JObject upscalerInputs = new JObject()
         {
-            ["image"] = new JArray() { loadVideoNode, 0 },  // frames output
+            ["image"] = loadedVideoFrames,  // frames output (via VRAM cleanup if available)
             ["dit"] = new JArray() { ditLoaderNode, 0 },
             ["vae"] = new JArray() { vaeLoaderNode, 0 },
             ["seed"] = seed,
@@ -1138,11 +1275,11 @@ public class SeedVR2UpscalerExtension : Extension
         };
         string upscalerNode = g.CreateNode("SeedVR2VideoUpscaler", upscalerInputs);
 
-        // 6. Get audio and fps from loaded video
+        // 7. Get audio and fps from loaded video
         JArray videoAudio = new JArray() { loadVideoNode, 1 };  // audio output
         JArray videoFps = new JArray() { loadVideoNode, 2 };    // fps output
 
-        // 7. CreateVideo - combine upscaled frames with original audio
+        // 8. CreateVideo - combine upscaled frames with original audio
         string createVideoNode = g.CreateNode("CreateVideo", new JObject()
         {
             ["images"] = new JArray() { upscalerNode, 0 },
@@ -1150,7 +1287,7 @@ public class SeedVR2UpscalerExtension : Extension
             ["fps"] = videoFps
         });
 
-        // 8. SaveVideo - save the upscaled result
+        // 9. SaveVideo - save the upscaled result
         // Convert SwarmUI video format to ComfyUI SaveVideo format
         string swarmVideoFormat = g.UserInput.Get(T2IParamTypes.VideoFormat, "h264-mp4");
         string container = "mp4";
@@ -1437,5 +1574,226 @@ public class SeedVR2UpscalerExtension : Extension
         g.FinalImageOut = upscalerOutput;
 
         Logs.Info($"SeedVR2 Video: Video upscaling workflow complete");
+    }
+
+    /// <summary>Resolves an image path to an absolute file system path.</summary>
+    /// <param name="imagePath">The image path (may be Output/, View/, or absolute).</param>
+    /// <param name="user">The user for resolving output directories.</param>
+    /// <returns>The resolved absolute file path, or null if it cannot be resolved.</returns>
+    private static string ResolveImagePath(string imagePath, User user)
+    {
+        if (string.IsNullOrEmpty(imagePath))
+        {
+            return null;
+        }
+
+        // Expand home directory
+        if (imagePath.StartsWith("~/"))
+        {
+            imagePath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + imagePath[1..];
+        }
+
+        // Resolve Output/ or View/ paths using user's output directory
+        if (user is not null)
+        {
+            string relativePath = null;
+            if (imagePath.StartsWith("Output/"))
+            {
+                relativePath = imagePath["Output/".Length..];
+            }
+            else if (imagePath.StartsWith("View/"))
+            {
+                // View/{user_id}/path format - strip View/{user_id}/ prefix
+                string afterView = imagePath["View/".Length..];
+                int slashIndex = afterView.IndexOf('/');
+                if (slashIndex > 0)
+                {
+                    relativePath = afterView[(slashIndex + 1)..];
+                }
+            }
+
+            if (relativePath is not null)
+            {
+                string root = Utilities.CombinePathWithAbsolute(Environment.CurrentDirectory, user.OutputDirectory);
+                return UserImageHistoryHelper.GetRealPathFor(user, $"{root}/{relativePath}", root: root);
+            }
+        }
+
+        return imagePath;
+    }
+
+    /// <summary>Extracts ExifProfile from source image (file path or data URL).</summary>
+    /// <param name="sourceImagePath">The source image path or data URL.</param>
+    /// <param name="user">The user for resolving paths.</param>
+    /// <returns>A cloned ExifProfile from the source, or null if extraction fails.</returns>
+    private static ExifProfile ExtractSourceExif(string sourceImagePath, User user)
+    {
+        try
+        {
+            if (sourceImagePath.StartsWith("data:"))
+            {
+                ImageFile img = ImageFile.FromDataString(sourceImagePath);
+                return img.ToIS.Metadata.ExifProfile?.DeepClone();
+            }
+
+            // Resolve Output/View paths
+            string resolvedPath = ResolveImagePath(sourceImagePath, user);
+            if (string.IsNullOrEmpty(resolvedPath) || !System.IO.File.Exists(resolvedPath))
+            {
+                return null;
+            }
+
+            using ISImage image = ISImage.Load(resolvedPath);
+            return image.Metadata.ExifProfile?.DeepClone();
+        }
+        catch (Exception ex)
+        {
+            Logs.Debug($"SeedVR2: Could not extract source EXIF: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>Handles PostGenerateEvent - currently unused but reserved for future enhancements.</summary>
+    /// <param name="p">The post-generation event parameters.</param>
+    private static void HandleSeedVR2PostGeneration(T2IEngine.PostGenerationEventParams p)
+    {
+        // EXIF is now extracted during workflow generation in GenerateSeedVR2ImageFileWorkflow
+        // This handler is kept for future enhancements
+    }
+
+    /// <summary>Handles PostBatchEvent to apply source EXIF metadata to output files.</summary>
+    /// <param name="p">The post-batch event parameters.</param>
+    private static void HandleSeedVR2PostBatch(T2IEngine.PostBatchEventParams p)
+    {
+        // Check if we have stored source EXIF for this request
+        long requestId = p.UserInput.UserRequestId;
+        if (!PendingSourceExif.TryRemove(requestId, out byte[] exifBytes))
+        {
+            return;
+        }
+
+        Logs.Info($"SeedVR2 EXIF: Processing request {requestId} with {exifBytes.Length} bytes of EXIF data");
+
+        // Reconstruct ExifProfile from bytes
+        ExifProfile sourceExif;
+        try
+        {
+            sourceExif = new ExifProfile(exifBytes);
+            Logs.Info($"SeedVR2 EXIF: Reconstructed profile with {sourceExif.Values.Count()} tags");
+        }
+        catch (Exception ex)
+        {
+            Logs.Warning($"SeedVR2 EXIF: Could not reconstruct EXIF profile: {ex.Message}");
+            return;
+        }
+
+        // Get the user's output directory to find saved files
+        User user = p.UserInput.SourceSession?.User;
+        if (user is null)
+        {
+            Logs.Warning("SeedVR2 EXIF: No user session found");
+            return;
+        }
+
+        // Find files that are currently being saved by this session
+        // StillSavingFiles maps file paths to their save tasks
+        string userOutputDir = System.IO.Path.GetFullPath(Utilities.CombinePathWithAbsolute(Environment.CurrentDirectory, user.OutputDirectory));
+        Logs.Info($"SeedVR2 EXIF: Checking StillSavingFiles ({Session.StillSavingFiles.Count} entries) for files in {userOutputDir}");
+        List<string> filesToProcess = [];
+        foreach (var kvp in Session.StillSavingFiles)
+        {
+            string filePath = kvp.Key;
+            Logs.Verbose($"SeedVR2 EXIF: Checking file {filePath}");
+            // Check if this file belongs to the current user's output directory
+            if (filePath.StartsWith(userOutputDir))
+            {
+                filesToProcess.Add(filePath);
+            }
+        }
+
+        Logs.Info($"SeedVR2 EXIF: Found {filesToProcess.Count} files to process");
+
+        if (filesToProcess.Count == 0)
+        {
+            Logs.Warning("SeedVR2 EXIF: No files found in StillSavingFiles for this user's output directory");
+            return;
+        }
+
+        // Apply EXIF to each file after it finishes saving
+        foreach (string filePath in filesToProcess)
+        {
+            if (Session.StillSavingFiles.TryGetValue(filePath, out Task<byte[]> saveTask))
+            {
+                saveTask.ContinueWith(_ =>
+                {
+                    // Small delay to ensure file is fully written
+                    Task.Delay(100).Wait();
+                    ApplySourceExifToFile(filePath, sourceExif);
+                });
+            }
+        }
+    }
+
+    /// <summary>Applies source EXIF metadata to a saved image file, preserving SwarmUI's UserComment.</summary>
+    /// <param name="filePath">The path to the saved image file.</param>
+    /// <param name="sourceExif">The source EXIF profile to apply.</param>
+    private static void ApplySourceExifToFile(string filePath, ExifProfile sourceExif)
+    {
+        try
+        {
+            if (!System.IO.File.Exists(filePath))
+            {
+                Logs.Debug($"SeedVR2 EXIF: File does not exist: {filePath}");
+                return;
+            }
+
+            // Only apply EXIF to JPEG/TIFF files (PNG uses different metadata)
+            string ext = System.IO.Path.GetExtension(filePath).ToLowerInvariant();
+            if (ext != ".jpg" && ext != ".jpeg" && ext != ".tif" && ext != ".tiff")
+            {
+                Logs.Debug($"SeedVR2 EXIF: Skipping non-EXIF format: {ext}");
+                return;
+            }
+
+            // Load image, modify EXIF, save back
+            byte[] imageBytes = System.IO.File.ReadAllBytes(filePath);
+            using ISImage image = ISImage.Load(imageBytes);
+
+            // Preserve SwarmUI's UserComment (contains generation metadata)
+            string userComment = null;
+            if (image.Metadata.ExifProfile?.TryGetValue(ExifTag.UserComment, out var uc) ?? false)
+            {
+                userComment = uc.Value.Text;
+            }
+
+            // Clone source EXIF and apply
+            ExifProfile merged = sourceExif.DeepClone();
+
+            // Restore UserComment with SwarmUI metadata
+            if (!string.IsNullOrEmpty(userComment))
+            {
+                merged.SetValue(ExifTag.UserComment, userComment);
+            }
+
+            // Apply merged EXIF
+            image.Metadata.ExifProfile = merged;
+
+            // Save with appropriate encoder based on extension
+            using var outputStream = new System.IO.FileStream(filePath, System.IO.FileMode.Create);
+            if (ext == ".jpg" || ext == ".jpeg")
+            {
+                image.SaveAsJpeg(outputStream);
+            }
+            else if (ext == ".tif" || ext == ".tiff")
+            {
+                image.SaveAsTiff(outputStream);
+            }
+
+            Logs.Info($"SeedVR2 EXIF: Applied {sourceExif.Values.Count()} camera EXIF tags to {System.IO.Path.GetFileName(filePath)}");
+        }
+        catch (Exception ex)
+        {
+            Logs.Warning($"SeedVR2 EXIF: Failed to apply source EXIF to {filePath}: {ex.Message}");
+        }
     }
 }

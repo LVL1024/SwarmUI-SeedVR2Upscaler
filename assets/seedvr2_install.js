@@ -26,30 +26,63 @@ addInstallButton('seedvrupscaler', 'seedvr2_upscaler', 'seedvr2_upscaler', 'Inst
                 if (typeof currentBackendFeatureSet !== 'undefined' &&
                     currentBackendFeatureSet.includes('seedvr2_upscaler')) {
 
-                    // Skip data URLs
+                    // Check if this is a data URL (drag & dropped image)
                     let isDataImage = src.startsWith('data:');
-                    if (!isDataImage) {
-                        // Determine if this is a video or image based on extension
-                        let extension = src.split('.').pop().toLowerCase().split('?')[0];
-                        let isVideo = videoExtensions.includes(extension);
 
+                    // Determine if this is a video or image based on extension (for file paths)
+                    // Data URLs are always images (video data URLs aren't supported)
+                    let isVideo = false;
+                    if (!isDataImage) {
+                        let extension = src.split('.').pop().toLowerCase().split('?')[0];
+                        isVideo = videoExtensions.includes(extension);
+                    }
+
+                    // Skip data URL videos (not supported), but allow data URL images
+                    if (!isVideo || !isDataImage) {
                         buttons.push({
                             label: 'SeedVR2 Upscale',
                             title: 'Upscale this ' + (isVideo ? 'video' : 'image') + ' using SeedVR2 AI upscaler',
                             onclick: (e) => {
-                                // Use getImageOutPrefix() to get correct prefix (Output or View/{user_id})
-                                let prefix = typeof getImageOutPrefix === 'function' ? getImageOutPrefix() : 'Output';
-                                let filePath = prefix + '/' + fullsrc;
-
                                 // Build input overrides with the appropriate file parameter
                                 let input_overrides = {
                                     'images': 1
                                 };
 
-                                if (isVideo) {
-                                    input_overrides['seedvr2videofile'] = filePath;
+                                if (isDataImage) {
+                                    // For data URLs (drag & dropped images), pass the data URL directly
+                                    input_overrides['seedvr2imagefile'] = src;
                                 } else {
-                                    input_overrides['seedvr2imagefile'] = filePath;
+                                    // For file paths, use getImageOutPrefix() for correct prefix
+                                    let prefix = typeof getImageOutPrefix === 'function' ? getImageOutPrefix() : 'Output';
+                                    let filePath = prefix + '/' + fullsrc;
+
+                                    if (isVideo) {
+                                        input_overrides['seedvr2videofile'] = filePath;
+                                    } else {
+                                        input_overrides['seedvr2imagefile'] = filePath;
+                                    }
+                                }
+
+                                // Preserve original image metadata (fixes issue #12)
+                                if (metadata) {
+                                    try {
+                                        let readable = typeof interpretMetadata === 'function' ? interpretMetadata(metadata) : metadata;
+                                        if (readable) {
+                                            let metadataParsed = JSON.parse(readable);
+                                            if (metadataParsed.sui_image_params) {
+                                                for (let key in metadataParsed.sui_image_params) {
+                                                    // Skip SeedVR2 params (use current UI settings) and special params
+                                                    if (!key.startsWith('seedvr2') &&
+                                                        key !== 'images' &&
+                                                        key !== 'swarm_version') {
+                                                        input_overrides[key] = metadataParsed.sui_image_params[key];
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } catch (e) {
+                                        console.log('SeedVR2: Could not parse original metadata:', e);
+                                    }
                                 }
 
                                 // Trigger generation with the file parameter
