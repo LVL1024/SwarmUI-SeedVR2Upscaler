@@ -70,11 +70,17 @@ addInstallButton('seedvrupscaler', 'seedvr2_upscaler', 'seedvr2_upscaler', 'Inst
                                         if (readable) {
                                             let metadataParsed = JSON.parse(readable);
                                             if (metadataParsed.sui_image_params) {
+                                                // Params to skip - not used in file upscaling or could cause validation errors
+                                                let skipParams = [
+                                                    'model', 'refinermodel', 'loras', 'loraweights',  // Models may not exist
+                                                    'images', 'swarm_version',  // Special params
+                                                    'width', 'height', 'aspectratio', 'sidelength'  // Resolution comes from source image
+                                                ];
                                                 for (let key in metadataParsed.sui_image_params) {
-                                                    // Skip SeedVR2 params (use current UI settings) and special params
-                                                    if (!key.startsWith('seedvr2') &&
-                                                        key !== 'images' &&
-                                                        key !== 'swarm_version') {
+                                                    let keyLower = key.toLowerCase();
+                                                    // Skip SeedVR2 params (use current UI settings) and params in skip list
+                                                    if (!keyLower.startsWith('seedvr') &&
+                                                        !skipParams.includes(keyLower)) {
                                                         input_overrides[key] = metadataParsed.sui_image_params[key];
                                                     }
                                                 }

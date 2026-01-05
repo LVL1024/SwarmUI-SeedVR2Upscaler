@@ -1672,6 +1672,18 @@ public class SeedVR2UpscalerExtension : Extension
         "seedvrvideofile", "seedvrimagefile"
     ];
 
+    /// <summary>Set of parameter IDs to skip when applying source metadata - not used in file upscaling or could cause validation errors.</summary>
+    /// <remarks>IDs are cleaned by T2IParamTypes.CleanTypeName which keeps only lowercase letters.</remarks>
+    private static readonly HashSet<string> SkipSourceMetadataParams =
+    [
+        // Model params - may reference models that no longer exist (fixes issue #13)
+        "model", "refinermodel", "loras", "loraweights", "loratencweights",
+        // Resolution params - determined by source image, not original generation
+        "width", "height", "aspectratio", "sidelength", "altresolutionheightmult", "rawresolution",
+        // Backend params - not relevant for file upscaling
+        "internalbackendtype", "exactbackendid"
+    ];
+
     /// <summary>Applies source image metadata to the user input, preserving original generation params.</summary>
     /// <remarks>
     /// For file upscaling, the output should preserve the original image's generation metadata (prompt, model, etc.)
@@ -1728,6 +1740,12 @@ public class SeedVR2UpscalerExtension : Extension
 
             // Skip SeedVR2 params - we want to use current request values for those
             if (SeedVR2ParamIds.Contains(paramId))
+            {
+                continue;
+            }
+
+            // Skip params that are not used in file upscaling or could cause validation errors (issue #13)
+            if (SkipSourceMetadataParams.Contains(paramId))
             {
                 continue;
             }
