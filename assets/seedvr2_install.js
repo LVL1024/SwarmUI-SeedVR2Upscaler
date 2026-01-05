@@ -63,6 +63,30 @@ addInstallButton('seedvrupscaler', 'seedvr2_upscaler', 'seedvr2_upscaler', 'Inst
                                     }
                                 }
 
+                                // Read SeedVR2 params directly from UI, regardless of group toggle state (fixes issue #14)
+                                // When user explicitly clicks "SeedVR2 Upscale", they expect their configured settings to be used
+                                let seedvr2Params = [
+                                    'seedvr2model', 'seedvr2upscaleby', 'seedvr2resolution', 'seedvr2blockswap',
+                                    'seedvr2colorcorrection', 'seedvr2twostepmode', 'seedvr2predownscale', 'seedvr2tiledvae',
+                                    'seedvr2latentnoisescale', 'seedvr2inputnoisescale', 'seedvr2cachemodel', 'seedvr2attentionmode',
+                                    'seedvr2vaeoffloaddevice', 'seedvr2videobatchsize', 'seedvr2temporaloverlap', 'seedvr2uniformbatchsize'
+                                ];
+                                for (let paramId of seedvr2Params) {
+                                    let elem = document.getElementById('input_' + paramId);
+                                    if (elem) {
+                                        // Check if param is toggleable and toggled off - skip if so
+                                        let toggleElem = document.getElementById('input_' + paramId + '_toggle');
+                                        if (toggleElem && !toggleElem.checked) {
+                                            continue;
+                                        }
+                                        // Get value using getInputVal if available, otherwise read directly
+                                        let val = typeof getInputVal === 'function' ? getInputVal(elem, true) : elem.value;
+                                        if (val != null && val !== '') {
+                                            input_overrides[paramId] = val;
+                                        }
+                                    }
+                                }
+
                                 // Preserve original image metadata (fixes issue #12)
                                 if (metadata) {
                                     try {
