@@ -105,9 +105,6 @@ public class SeedVR2UpscalerExtension : Extension
     /// <summary>Supported model file extensions for discovery.</summary>
     private static readonly string[] SupportedModelExtensions = [".safetensors", ".gguf"];
 
-    /// <summary>Discovered model files from the seedvr2 directory (populated on init).</summary>
-    private static List<string> DiscoveredModels = [];
-
     /// <summary>Temporary storage for source EXIF profiles, keyed by request ID. Avoids serialization into image metadata.</summary>
     private static readonly ConcurrentDictionary<long, byte[]> PendingSourceExif = new();
 
@@ -117,10 +114,9 @@ public class SeedVR2UpscalerExtension : Extension
         return Path.Combine(Program.ServerSettings.Paths.ActualModelRoot, "seedvr2");
     }
 
-    /// <summary>Scans the seedvr2 model directory and discovers any model files not already in DiTModelMap.</summary>
+    /// <summary>Scans the seedvr2 model directory and adds any new model files to DiTModelMap.</summary>
     public static void ScanForDiscoveredModels()
     {
-        DiscoveredModels.Clear();
         string modelDir = GetSeedVR2ModelDirectory();
 
         if (!Directory.Exists(modelDir))
@@ -131,6 +127,7 @@ public class SeedVR2UpscalerExtension : Extension
         }
 
         HashSet<string> knownFiles = new(DiTModelMap.Values, StringComparer.OrdinalIgnoreCase);
+        var discoveredCount = 0;
 
         foreach (string file in Directory.GetFiles(modelDir))
         {
@@ -141,12 +138,14 @@ public class SeedVR2UpscalerExtension : Extension
                 continue;
             }
 
-            DiscoveredModels.Add(fileName);
+            // Use filename as both key and value for discovered models
+            DiTModelMap[fileName] = fileName;
+            discoveredCount++;
         }
 
-        if (DiscoveredModels.Count > 0)
+        if (discoveredCount > 0)
         {
-            Logs.Info($"SeedVR2: Discovered {DiscoveredModels.Count} additional model(s) in {modelDir}: {string.Join(", ", DiscoveredModels)}");
+            Logs.Info($"SeedVR2: Discovered {discoveredCount} additional model(s) in {modelDir}");
         }
     }
 
@@ -176,33 +175,21 @@ public class SeedVR2UpscalerExtension : Extension
             "seedvr2-7b-sharp-q4///7B Sharp GGUF Q4 (Acceptable detail, ~12GB)",
         ];
 
-        foreach (string model in DiscoveredModels)
+        // Add discovered models (where key == value, meaning user-added files)
+        HashSet<string> staticKeys = new(values.Select(v => v.Before("///")));
+        foreach (var kvp in DiTModelMap.Where(kvp => kvp.Key == kvp.Value && !staticKeys.Contains(kvp.Key)))
         {
-            string displayName = Path.GetFileNameWithoutExtension(model);
-            values.Add($"discovered:{model}///{displayName} (User Model)");
+            string displayName = Path.GetFileNameWithoutExtension(kvp.Key);
+            values.Add($"{kvp.Key}///{displayName} (User Model)");
         }
 
         return values;
     }
 
     /// <summary>Resolves a model key to the actual model filename.</summary>
-    /// <param name="modelKey">The model key from the dropdown (e.g., "seedvr2-3b-fp8" or "discovered:mymodel.safetensors").</param>
-    /// <param name="fallback">Fallback filename if the key is not found.</param>
-    /// <returns>The model filename.</returns>
-    public static string ResolveModelFilename(string modelKey, string fallback = "seedvr2_ema_3b_fp8_e4m3fn.safetensors")
+    public static string ResolveModelFilename(string modelKey)
     {
-        if (modelKey.StartsWith("discovered:"))
-        {
-            return modelKey["discovered:".Length..];
-        }
-
-        if (DiTModelMap.TryGetValue(modelKey, out string ditModel))
-        {
-            return ditModel;
-        }
-
-        Logs.Warning($"SeedVR2: Unknown model key '{modelKey}', falling back to {fallback}");
-        return fallback;
+        return DiTModelMap.TryGetValue(modelKey, out string ditModel) ? ditModel : modelKey;
     }
 
     /// <inheritdoc/>
@@ -1245,8 +1232,7 @@ public class SeedVR2UpscalerExtension : Extension
             }
         }
 
-        // Get actual model filename
-        string ditModel = ResolveModelFilename(modelKey, "seedvr2_ema_3b_fp16.safetensors");
+        string ditModel = ResolveModelFilename(modelKey);
 
         // Get resolution settings - use SeedVR2UpscaleBy to calculate target
         double seedvrUpscaleBy = g.UserInput.Get(SeedVR2UpscaleBy, 2.0);  // Default 2x for video
