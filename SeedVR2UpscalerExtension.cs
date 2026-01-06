@@ -1498,7 +1498,6 @@ public class SeedVR2UpscalerExtension : Extension
             Logs.Warning($"SeedVR2 Video: Unknown model key '{modelKey}', falling back to 3B FP8");
         }
 
-        // Ensure model is downloaded (lazy download on first use)
         EnsureModelDownloaded(ditModel, g);
 
         // Calculate target resolution based on upscale factor
