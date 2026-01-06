@@ -65,6 +65,7 @@ addInstallButton('seedvrupscaler', 'seedvr2_upscaler', 'seedvr2_upscaler', 'Inst
 
                                 // Read SeedVR2 params directly from UI, regardless of group toggle state (fixes issue #14)
                                 // When user explicitly clicks "SeedVR2 Upscale", they expect their configured settings to be used
+                                // We ignore individual param toggles here - user clicked the button, they want upscaling with their settings
                                 let seedvr2Params = [
                                     'seedvr2model', 'seedvr2upscaleby', 'seedvr2resolution', 'seedvr2blockswap',
                                     'seedvr2colorcorrection', 'seedvr2twostepmode', 'seedvr2predownscale', 'seedvr2tiledvae',
@@ -73,17 +74,24 @@ addInstallButton('seedvrupscaler', 'seedvr2_upscaler', 'seedvr2_upscaler', 'Inst
                                 ];
                                 for (let paramId of seedvr2Params) {
                                     let elem = document.getElementById('input_' + paramId);
+                                    let val = null;
+
+                                    // Try reading from the input element first
                                     if (elem) {
-                                        // Check if param is toggleable and toggled off - skip if so
-                                        let toggleElem = document.getElementById('input_' + paramId + '_toggle');
-                                        if (toggleElem && !toggleElem.checked) {
-                                            continue;
+                                        val = typeof getInputVal === 'function' ? getInputVal(elem, true) : elem.value;
+                                    }
+
+                                    // If element doesn't exist or has empty/null value, try reading from cookie
+                                    // This handles the case where the group was never enabled but user has saved preferences
+                                    if ((val == null || val === '') && typeof getCookie === 'function') {
+                                        let cookieVal = getCookie('lastparam_input_' + paramId);
+                                        if (cookieVal) {
+                                            val = cookieVal;
                                         }
-                                        // Get value using getInputVal if available, otherwise read directly
-                                        let val = typeof getInputVal === 'function' ? getInputVal(elem, true) : elem.value;
-                                        if (val != null && val !== '') {
-                                            input_overrides[paramId] = val;
-                                        }
+                                    }
+
+                                    if (val != null && val !== '') {
+                                        input_overrides[paramId] = val;
                                     }
                                 }
 
