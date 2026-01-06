@@ -1206,15 +1206,25 @@ public class SeedVR2UpscalerExtension : Extension
 
         // === Create workflow nodes ===
 
-        // 1. LoadVideo node - load the existing video file
+        // 1. LoadVideo node - load the existing video file (outputs Video object)
         string loadVideoNode = g.CreateNode("LoadVideo", new JObject()
         {
             ["file"] = videoFile
         });
 
-        // 2. Add VRAM cleanup node to unload any existing models before SeedVR2
+        // 2. GetVideoComponents - extract frames, audio, and fps from Video object
+        // LoadVideo outputs a Video object, not frames, so we need this conversion step
+        string getComponentsNode = g.CreateNode("GetVideoComponents", new JObject()
+        {
+            ["video"] = new JArray() { loadVideoNode, 0 }
+        });
+        // GetVideoComponents outputs: [0]=images, [1]=audio, [2]=fps
+        JArray loadedVideoFrames = new JArray() { getComponentsNode, 0 };
+        JArray videoAudio = new JArray() { getComponentsNode, 1 };
+        JArray videoFps = new JArray() { getComponentsNode, 2 };
+
+        // 3. Add VRAM cleanup node to unload any existing models before SeedVR2
         // This frees up VRAM so SeedVR2 has enough room to load its models
-        JArray loadedVideoFrames = new JArray() { loadVideoNode, 0 };
         if (g.Features.Contains("kjnodes"))
         {
             string vramCleanupNode = g.CreateNode("VRAM_Debug", new JObject()
@@ -1227,7 +1237,7 @@ public class SeedVR2UpscalerExtension : Extension
             loadedVideoFrames = new JArray() { vramCleanupNode, 1 };  // output index 1 is image_pass
         }
 
-        // 3. SeedVR2LoadDiTModel - load the upscaler model
+        // 4. SeedVR2LoadDiTModel - load the upscaler model
         JObject ditLoaderInputs = new JObject()
         {
             ["model"] = ditModel,
@@ -1283,11 +1293,7 @@ public class SeedVR2UpscalerExtension : Extension
         };
         string upscalerNode = g.CreateNode("SeedVR2VideoUpscaler", upscalerInputs);
 
-        // 7. Get audio and fps from loaded video
-        JArray videoAudio = new JArray() { loadVideoNode, 1 };  // audio output
-        JArray videoFps = new JArray() { loadVideoNode, 2 };    // fps output
-
-        // 8. CreateVideo - combine upscaled frames with original audio
+        // 7. CreateVideo - combine upscaled frames with original audio
         string createVideoNode = g.CreateNode("CreateVideo", new JObject()
         {
             ["images"] = new JArray() { upscalerNode, 0 },
