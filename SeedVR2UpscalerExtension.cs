@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.IO;
 using System.Linq;
 using FreneticUtilities.FreneticExtensions;
 using Newtonsoft.Json.Linq;
@@ -101,8 +102,95 @@ public class SeedVR2UpscalerExtension : Extension
         ["seedvr2-preset-max"] = ("seedvr2-7b-sharp-fp16", 0, false),
     };
 
+    /// <summary>Supported model file extensions for discovery.</summary>
+    private static readonly string[] SupportedModelExtensions = [".safetensors", ".gguf"];
+
     /// <summary>Temporary storage for source EXIF profiles, keyed by request ID. Avoids serialization into image metadata.</summary>
     private static readonly ConcurrentDictionary<long, byte[]> PendingSourceExif = new();
+
+    /// <summary>Gets the SwarmUI model directory path for SeedVR2 models.</summary>
+    public static string GetSeedVR2ModelDirectory()
+    {
+        return Path.Combine(Program.ServerSettings.Paths.ActualModelRoot, "seedvr2");
+    }
+
+    /// <summary>Scans the seedvr2 model directory and adds any new model files to DiTModelMap.</summary>
+    public static void ScanForDiscoveredModels()
+    {
+        string modelDir = GetSeedVR2ModelDirectory();
+
+        if (!Directory.Exists(modelDir))
+        {
+            Directory.CreateDirectory(modelDir);
+            Logs.Info($"SeedVR2: Created model directory at {modelDir}");
+            return;
+        }
+
+        HashSet<string> knownFiles = new(DiTModelMap.Values, StringComparer.OrdinalIgnoreCase);
+        var discoveredCount = 0;
+
+        foreach (string file in Directory.GetFiles(modelDir))
+        {
+            string fileName = Path.GetFileName(file);
+
+            if (!SupportedModelExtensions.Contains(Path.GetExtension(file).ToLowerInvariant()) || knownFiles.Contains(fileName))
+            {
+                continue;
+            }
+
+            // Use filename as both key and value for discovered models
+            DiTModelMap[fileName] = fileName;
+            discoveredCount++;
+        }
+
+        if (discoveredCount > 0)
+        {
+            Logs.Info($"SeedVR2: Discovered {discoveredCount} additional model(s) in {modelDir}");
+        }
+    }
+
+    /// <summary>Gets the list of model dropdown values, including discovered models.</summary>
+    public static List<string> GetModelDropdownValues()
+    {
+        List<string> values =
+        [
+            // Presets (auto-configure settings)
+            "seedvr2-auto///Auto (VRAM-based)",
+            "seedvr2-preset-fast///Preset: Fast (3B Q4)",
+            "seedvr2-preset-balanced///Preset: Balanced (3B FP8)",
+            "seedvr2-preset-quality///Preset: Quality (7B FP8)",
+            "seedvr2-preset-max///Preset: Max Quality (7B Sharp FP16)",
+            // 3B Models - Faster, lower VRAM
+            "seedvr2-3b-fp16///3B FP16 (Best quality, ~16GB)",
+            "seedvr2-3b-fp8///3B FP8 (Good quality, ~12GB)",
+            "seedvr2-3b-q8///3B GGUF Q8 (Good quality, ~10GB)",
+            "seedvr2-3b-q4///3B GGUF Q4 (Acceptable quality, ~8GB)",
+            // 7B Models - Higher quality, higher VRAM
+            "seedvr2-7b-fp16///7B FP16 (Best quality, ~28GB)",
+            "seedvr2-7b-fp8///7B FP8 Mixed (Good quality, ~20GB)",
+            "seedvr2-7b-q4///7B GGUF Q4 (Acceptable quality, ~12GB)",
+            // 7B Sharp Models - Enhanced detail
+            "seedvr2-7b-sharp-fp16///7B Sharp FP16 (Best detail, ~28GB)",
+            "seedvr2-7b-sharp-fp8///7B Sharp FP8 Mixed (Good detail, ~20GB)",
+            "seedvr2-7b-sharp-q4///7B Sharp GGUF Q4 (Acceptable detail, ~12GB)",
+        ];
+
+        // Add discovered models (where key == value, meaning user-added files)
+        HashSet<string> staticKeys = new(values.Select(v => v.Before("///")));
+        foreach (var kvp in DiTModelMap.Where(kvp => kvp.Key == kvp.Value && !staticKeys.Contains(kvp.Key)))
+        {
+            string displayName = Path.GetFileNameWithoutExtension(kvp.Key);
+            values.Add($"{kvp.Key}///{displayName} (User Model)");
+        }
+
+        return values;
+    }
+
+    /// <summary>Resolves a model key to the actual model filename.</summary>
+    public static string ResolveModelFilename(string modelKey)
+    {
+        return DiTModelMap.TryGetValue(modelKey, out string ditModel) ? ditModel : modelKey;
+    }
 
     /// <inheritdoc/>
     public override void OnPreInit()
@@ -122,6 +210,14 @@ public class SeedVR2UpscalerExtension : Extension
         // Register KJNodes feature for VRAM cleanup support
         ComfyUIBackendExtension.NodeToFeatureMap["VRAM_Debug"] = "kjnodes";
 
+        // Register "seedvr2" folder path so ComfyUI can find models in SwarmUI's model directory
+        if (!ComfyUISelfStartBackend.FoldersToForwardInComfyPath.Contains("seedvr2"))
+        {
+            ComfyUISelfStartBackend.FoldersToForwardInComfyPath.Add("seedvr2");
+        }
+
+        ScanForDiscoveredModels();
+
         // Register installable feature for the SeedVR2 ComfyUI node
         InstallableFeatures.RegisterInstallableFeature(new("SeedVR2 Video Upscaler", "seedvr2_upscaler", "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler", "numz", "This will install the SeedVR2 Video Upscaler ComfyUI node by numz.\nDo you wish to install?"));
 
@@ -139,29 +235,10 @@ public class SeedVR2UpscalerExtension : Extension
             "Which SeedVR2 model to use.\n" +
             "Presets auto-configure Block Swap and Tiled VAE for typical VRAM constraints.\n" +
             "Auto detects your GPU VRAM and selects an appropriate configuration.\n" +
-            "Individual models let you choose exactly which model file to use.",
+            "Individual models let you choose exactly which model file to use.\n" +
+            "User models can be added to Models/seedvr2/ and will appear automatically.",
             "seedvr2-auto",
-            GetValues: _ => [
-                // Presets (auto-configure settings)
-                "seedvr2-auto///Auto (VRAM-based)",
-                "seedvr2-preset-fast///Preset: Fast (3B Q4)",
-                "seedvr2-preset-balanced///Preset: Balanced (3B FP8)",
-                "seedvr2-preset-quality///Preset: Quality (7B FP8)",
-                "seedvr2-preset-max///Preset: Max Quality (7B Sharp FP16)",
-                // 3B Models - Faster, lower VRAM
-                "seedvr2-3b-fp16///3B FP16 (Best quality, ~16GB)",
-                "seedvr2-3b-fp8///3B FP8 (Good quality, ~12GB)",
-                "seedvr2-3b-q8///3B GGUF Q8 (Good quality, ~10GB)",
-                "seedvr2-3b-q4///3B GGUF Q4 (Acceptable quality, ~8GB)",
-                // 7B Models - Higher quality, higher VRAM
-                "seedvr2-7b-fp16///7B FP16 (Best quality, ~28GB)",
-                "seedvr2-7b-fp8///7B FP8 Mixed (Good quality, ~20GB)",
-                "seedvr2-7b-q4///7B GGUF Q4 (Acceptable quality, ~12GB)",
-                // 7B Sharp Models - Enhanced detail
-                "seedvr2-7b-sharp-fp16///7B Sharp FP16 (Best detail, ~28GB)",
-                "seedvr2-7b-sharp-fp8///7B Sharp FP8 Mixed (Good detail, ~20GB)",
-                "seedvr2-7b-sharp-q4///7B Sharp GGUF Q4 (Acceptable detail, ~12GB)"
-            ],
+            GetValues: _ => GetModelDropdownValues(),
             Group: SeedVR2Group,
             OrderPriority: 0
         ));
@@ -544,11 +621,7 @@ public class SeedVR2UpscalerExtension : Extension
         }
 
         // Get the actual model filename
-        if (!DiTModelMap.TryGetValue(modelKey, out string ditModel))
-        {
-            ditModel = "seedvr2_ema_3b_fp8_e4m3fn.safetensors"; // Fallback
-            Logs.Warning($"SeedVR2: Unknown model key '{modelKey}', falling back to 3B FP8");
-        }
+        string ditModel = ResolveModelFilename(modelKey);
 
         // Calculate target resolution based on upscale factor
         double upscaleFactor = g.UserInput.Get(T2IParamTypes.RefinerUpscale, 1.0);
@@ -841,11 +914,7 @@ public class SeedVR2UpscalerExtension : Extension
         }
 
         // Get actual model filename
-        if (!DiTModelMap.TryGetValue(modelKey, out string ditModel))
-        {
-            ditModel = "seedvr2_ema_3b_fp8_e4m3fn.safetensors";
-            Logs.Warning($"SeedVR2 Image File: Unknown model key '{modelKey}', falling back to 3B FP8");
-        }
+        string ditModel = ResolveModelFilename(modelKey);
 
         // Calculate target resolution based on upscale factor or direct resolution setting
         double seedvrUpscaleBy = g.UserInput.Get(SeedVR2UpscaleBy, 1.5);
@@ -1163,12 +1232,7 @@ public class SeedVR2UpscalerExtension : Extension
             }
         }
 
-        // Get actual model filename
-        if (!DiTModelMap.TryGetValue(modelKey, out string ditModel))
-        {
-            ditModel = "seedvr2_ema_3b_fp16.safetensors";
-            Logs.Warning($"SeedVR2 Video File: Unknown model key '{modelKey}', falling back to 3B FP16");
-        }
+        string ditModel = ResolveModelFilename(modelKey);
 
         // Get resolution settings - use SeedVR2UpscaleBy to calculate target
         double seedvrUpscaleBy = g.UserInput.Get(SeedVR2UpscaleBy, 2.0);  // Default 2x for video
@@ -1427,11 +1491,7 @@ public class SeedVR2UpscalerExtension : Extension
         }
 
         // Get the actual model filename
-        if (!DiTModelMap.TryGetValue(modelKey, out string ditModel))
-        {
-            ditModel = "seedvr2_ema_3b_fp8_e4m3fn.safetensors";
-            Logs.Warning($"SeedVR2 Video: Unknown model key '{modelKey}', falling back to 3B FP8");
-        }
+        string ditModel = ResolveModelFilename(modelKey);
 
         // Calculate target resolution based on upscale factor
         double upscaleFactor = g.UserInput.Get(T2IParamTypes.RefinerUpscale, 1.0);
