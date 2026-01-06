@@ -63,36 +63,28 @@ addInstallButton('seedvrupscaler', 'seedvr2_upscaler', 'seedvr2_upscaler', 'Inst
                                     }
                                 }
 
-                                // Read SeedVR2 params directly from UI, regardless of group toggle state (fixes issue #14)
-                                // When user explicitly clicks "SeedVR2 Upscale", they expect their configured settings to be used
-                                // We ignore individual param toggles here - user clicked the button, they want upscaling with their settings
+                                // Read SeedVR2 params from UI (fixes issue #14)
+                                // Note: SwarmUI strips "2" from "SeedVR2" when creating element IDs
                                 let seedvr2Params = [
-                                    'seedvr2model', 'seedvr2upscaleby', 'seedvr2resolution', 'seedvr2blockswap',
-                                    'seedvr2colorcorrection', 'seedvr2twostepmode', 'seedvr2predownscale', 'seedvr2tiledvae',
-                                    'seedvr2latentnoisescale', 'seedvr2inputnoisescale', 'seedvr2cachemodel', 'seedvr2attentionmode',
-                                    'seedvr2vaeoffloaddevice', 'seedvr2videobatchsize', 'seedvr2temporaloverlap', 'seedvr2uniformbatchsize'
+                                    'seedvrmodel', 'seedvrupscaleby', 'seedvrresolution', 'seedvrblockswap',
+                                    'seedvrcolorcorrection', 'seedvrtwostepmode', 'seedvrpredownscale', 'seedvrtiledvae',
+                                    'seedvrlatentnoisescale', 'seedvrinputnoisescale', 'seedvrcachemodel', 'seedvrattentionmode',
+                                    'seedvrvaeoffloaddevice', 'seedvrvideobatchsize', 'seedvrtemporaloverlap', 'seedvruniformbatchsize'
                                 ];
+
                                 for (let paramId of seedvr2Params) {
                                     let elem = document.getElementById('input_' + paramId);
-                                    let val = null;
-
-                                    // Try reading from the input element first
                                     if (elem) {
-                                        val = typeof getInputVal === 'function' ? getInputVal(elem, true) : elem.value;
-                                    }
-
-                                    // If element doesn't exist or has empty/null value, try reading from cookie
-                                    // This handles the case where the group was never enabled but user has saved preferences
-                                    if ((val == null || val === '') && typeof getCookie === 'function') {
-                                        let cookieVal = getCookie('lastparam_input_' + paramId);
-                                        if (cookieVal) {
-                                            val = cookieVal;
+                                        let val = typeof getInputVal === 'function' ? getInputVal(elem, true) : elem.value;
+                                        if (val != null && val !== '') {
+                                            input_overrides[paramId] = val;
                                         }
                                     }
+                                }
 
-                                    if (val != null && val !== '') {
-                                        input_overrides[paramId] = val;
-                                    }
+                                // Ensure seedvrmodel is always set - use default if nothing else found
+                                if (!input_overrides['seedvrmodel']) {
+                                    input_overrides['seedvrmodel'] = 'seedvr2-auto';
                                 }
 
                                 // Preserve original image metadata (fixes issue #12)
