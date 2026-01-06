@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.IO;
 using System.Linq;
 using FreneticUtilities.FreneticExtensions;
 using Newtonsoft.Json.Linq;
@@ -87,9 +88,26 @@ public class SeedVR2UpscalerExtension : Extension
         ["seedvr2-7b-q4"] = "seedvr2_ema_7b-Q4_K_M.gguf",
         ["seedvr2-7b-fp8"] = "seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors",
         ["seedvr2-7b-fp16"] = "seedvr2_ema_7b_fp16.safetensors",
+        ["seedvr2-7b-bf16"] = "seedvr2_ema_7b_bf16.safetensors",
         ["seedvr2-7b-sharp-q4"] = "seedvr2_ema_7b_sharp-Q4_K_M.gguf",
         ["seedvr2-7b-sharp-fp8"] = "seedvr2_ema_7b_sharp_fp8_e4m3fn_mixed_block35_fp16.safetensors",
         ["seedvr2-7b-sharp-fp16"] = "seedvr2_ema_7b_sharp_fp16.safetensors",
+        ["seedvr2-7b-sharp-bf16"] = "seedvr2_ema_7b_sharp_bf16.safetensors",
+    };
+
+    /// <summary>Model download URLs for lazy downloading: (URL, SaveAs filename, SHA256 hash).</summary>
+    public static readonly Dictionary<string, (string Url, string SaveAs, string Hash)> ModelDownloadUrls = new()
+    {
+        ["seedvr2_ema_7b_bf16.safetensors"] = (
+            "https://huggingface.co/SassyDiffusion/SeedVR2-7B_BF16/resolve/main/seedvr2_ema_7b.safetensors",
+            "seedvr2_ema_7b_bf16.safetensors",
+            "3ce122f5cd403098e4ee9112cc043483e57c3bf41eac49101a0c46ca2e4729c9"
+        ),
+        ["seedvr2_ema_7b_sharp_bf16.safetensors"] = (
+            "https://huggingface.co/SassyDiffusion/SeedVR2-7B_BF16/resolve/main/seedvr2_ema_7b_sharp.safetensors",
+            "seedvr2_ema_7b_sharp_bf16.safetensors",
+            "8f9de333aadf537e4f2fd39a58f84fe3f293be8daa9be613ac53f3618efad4ff"
+        ),
     };
 
     /// <summary>Quality preset configurations: (modelKey, blockSwap, tiledVAE).</summary>
@@ -99,10 +117,47 @@ public class SeedVR2UpscalerExtension : Extension
         ["seedvr2-preset-balanced"] = ("seedvr2-3b-fp8", 12, false),
         ["seedvr2-preset-quality"] = ("seedvr2-7b-fp8", 16, true),
         ["seedvr2-preset-max"] = ("seedvr2-7b-sharp-fp16", 0, false),
+        ["seedvr2-preset-ultra"] = ("seedvr2-7b-bf16", 0, false),
+        ["seedvr2-preset-ultra-sharp"] = ("seedvr2-7b-sharp-bf16", 0, false),
     };
 
     /// <summary>Temporary storage for source EXIF profiles, keyed by request ID. Avoids serialization into image metadata.</summary>
     private static readonly ConcurrentDictionary<long, byte[]> PendingSourceExif = new();
+
+    /// <summary>Gets the full path for a SeedVR2 model file.</summary>
+    public static string GetModelFilePath(string modelFileName)
+    {
+        var seedVr2Path = Path.Combine(Program.ServerSettings.Paths.ActualModelRoot, "seedvr2");
+        Directory.CreateDirectory(seedVr2Path);
+        return Path.Combine(seedVr2Path, modelFileName);
+    }
+
+    /// <summary>Ensures the specified model is downloaded before first use.</summary>
+    /// <param name="modelFileName">The model filename to check/download.</param>
+    /// <param name="g">The workflow generator for accessing download utilities.</param>
+    public static void EnsureModelDownloaded(string modelFileName, WorkflowGenerator g)
+    {
+        if (!ModelDownloadUrls.TryGetValue(modelFileName, out var downloadInfo))
+        {
+            return;
+        }
+
+        string modelPath = GetModelFilePath(downloadInfo.SaveAs);
+
+        if (File.Exists(modelPath))
+        {
+            return;
+        }
+
+        Logs.Info($"SeedVR2: Model '{downloadInfo.SaveAs}' not found, downloading...");
+        g.DownloadModel(
+            name: $"SeedVR2 {downloadInfo.SaveAs}",
+            filePath: modelPath,
+            url: downloadInfo.Url,
+            hash: downloadInfo.Hash
+        );
+        Logs.Info($"SeedVR2: Model '{downloadInfo.SaveAs}' downloaded successfully to {modelPath}");
+    }
 
     /// <inheritdoc/>
     public override void OnPreInit()
@@ -121,6 +176,12 @@ public class SeedVR2UpscalerExtension : Extension
 
         // Register KJNodes feature for VRAM cleanup support
         ComfyUIBackendExtension.NodeToFeatureMap["VRAM_Debug"] = "kjnodes";
+
+        // Register "seedvr2" folder path so ComfyUI can find models in SwarmUI's model directory
+        if (!ComfyUISelfStartBackend.FoldersToForwardInComfyPath.Contains("seedvr2"))
+        {
+            ComfyUISelfStartBackend.FoldersToForwardInComfyPath.Add("seedvr2");
+        }
 
         // Register installable feature for the SeedVR2 ComfyUI node
         InstallableFeatures.RegisterInstallableFeature(new("SeedVR2 Video Upscaler", "seedvr2_upscaler", "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler", "numz", "This will install the SeedVR2 Video Upscaler ComfyUI node by numz.\nDo you wish to install?"));
@@ -148,6 +209,8 @@ public class SeedVR2UpscalerExtension : Extension
                 "seedvr2-preset-balanced///Preset: Balanced (3B FP8)",
                 "seedvr2-preset-quality///Preset: Quality (7B FP8)",
                 "seedvr2-preset-max///Preset: Max Quality (7B Sharp FP16)",
+                "seedvr2-preset-ultra///Preset: Ultra Quality (7B BF16)",
+                "seedvr2-preset-ultra-sharp///Preset: Ultra Quality (7B Sharp BF16)",
                 // 3B Models - Faster, lower VRAM
                 "seedvr2-3b-fp16///3B FP16 (Best quality, ~16GB)",
                 "seedvr2-3b-fp8///3B FP8 (Good quality, ~12GB)",
@@ -155,10 +218,12 @@ public class SeedVR2UpscalerExtension : Extension
                 "seedvr2-3b-q4///3B GGUF Q4 (Acceptable quality, ~8GB)",
                 // 7B Models - Higher quality, higher VRAM
                 "seedvr2-7b-fp16///7B FP16 (Best quality, ~28GB)",
+                "seedvr2-7b-bf16///7B BF16 (Ultra quality, ~40GB)",
                 "seedvr2-7b-fp8///7B FP8 Mixed (Good quality, ~20GB)",
                 "seedvr2-7b-q4///7B GGUF Q4 (Acceptable quality, ~12GB)",
                 // 7B Sharp Models - Enhanced detail
                 "seedvr2-7b-sharp-fp16///7B Sharp FP16 (Best detail, ~28GB)",
+                "seedvr2-7b-sharp-bf16///7B Sharp BF16 (Ultra quality, ~40GB)",
                 "seedvr2-7b-sharp-fp8///7B Sharp FP8 Mixed (Good detail, ~20GB)",
                 "seedvr2-7b-sharp-q4///7B Sharp GGUF Q4 (Acceptable detail, ~12GB)"
             ],
@@ -550,6 +615,8 @@ public class SeedVR2UpscalerExtension : Extension
             Logs.Warning($"SeedVR2: Unknown model key '{modelKey}', falling back to 3B FP8");
         }
 
+        EnsureModelDownloaded(ditModel, g);
+
         // Calculate target resolution based on upscale factor
         double upscaleFactor = g.UserInput.Get(T2IParamTypes.RefinerUpscale, 1.0);
         double seedvrUpscaleBy = g.UserInput.Get(SeedVR2UpscaleBy, 1.0);
@@ -846,6 +913,8 @@ public class SeedVR2UpscalerExtension : Extension
             ditModel = "seedvr2_ema_3b_fp8_e4m3fn.safetensors";
             Logs.Warning($"SeedVR2 Image File: Unknown model key '{modelKey}', falling back to 3B FP8");
         }
+
+        EnsureModelDownloaded(ditModel, g);
 
         // Calculate target resolution based on upscale factor or direct resolution setting
         double seedvrUpscaleBy = g.UserInput.Get(SeedVR2UpscaleBy, 1.5);
@@ -1170,6 +1239,8 @@ public class SeedVR2UpscalerExtension : Extension
             Logs.Warning($"SeedVR2 Video File: Unknown model key '{modelKey}', falling back to 3B FP16");
         }
 
+        EnsureModelDownloaded(ditModel, g);
+
         // Get resolution settings - use SeedVR2UpscaleBy to calculate target
         double seedvrUpscaleBy = g.UserInput.Get(SeedVR2UpscaleBy, 2.0);  // Default 2x for video
         // Check if user specified a direct resolution target
@@ -1426,6 +1497,9 @@ public class SeedVR2UpscalerExtension : Extension
             ditModel = "seedvr2_ema_3b_fp8_e4m3fn.safetensors";
             Logs.Warning($"SeedVR2 Video: Unknown model key '{modelKey}', falling back to 3B FP8");
         }
+
+        // Ensure model is downloaded (lazy download on first use)
+        EnsureModelDownloaded(ditModel, g);
 
         // Calculate target resolution based on upscale factor
         double upscaleFactor = g.UserInput.Get(T2IParamTypes.RefinerUpscale, 1.0);
