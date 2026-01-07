@@ -671,7 +671,7 @@ public class SeedVR2UpscalerExtension : Extension
         JObject ditLoaderInputs = new JObject()
         {
             ["model"] = ditModel,
-            ["device"] = "cuda:0",
+            ["device"] = SeedVR2DeviceUtils.GetPrimaryComputeDevice(),
             ["blocks_to_swap"] = blockSwap,
             ["swap_io_components"] = blockSwap > 0,  // Also swap I/O components if using block swap
             ["offload_device"] = ditOffloadDevice,
@@ -700,7 +700,7 @@ public class SeedVR2UpscalerExtension : Extension
         JObject vaeLoaderInputs = new JObject()
         {
             ["model"] = "ema_vae_fp16.safetensors",
-            ["device"] = "cuda:0",
+            ["device"] = SeedVR2DeviceUtils.GetPrimaryComputeDevice(),
             ["encode_tiled"] = tiledVAE,
             ["decode_tiled"] = tiledVAE,
             ["offload_device"] = vaeOffloadDevice,
@@ -996,7 +996,7 @@ public class SeedVR2UpscalerExtension : Extension
         JObject ditLoaderInputs = new JObject()
         {
             ["model"] = ditModel,
-            ["device"] = "cuda:0",
+            ["device"] = SeedVR2DeviceUtils.GetPrimaryComputeDevice(),
             ["blocks_to_swap"] = blockSwap,
             ["swap_io_components"] = blockSwap > 0,
             ["offload_device"] = ditOffloadDevice,
@@ -1009,7 +1009,7 @@ public class SeedVR2UpscalerExtension : Extension
         JObject vaeLoaderInputs = new JObject()
         {
             ["model"] = "ema_vae_fp16.safetensors",
-            ["device"] = "cuda:0",
+            ["device"] = SeedVR2DeviceUtils.GetPrimaryComputeDevice(),
             ["encode_tiled"] = tiledVAE,
             ["decode_tiled"] = tiledVAE,
             ["offload_device"] = vaeOffloadDevice,
@@ -1305,7 +1305,7 @@ public class SeedVR2UpscalerExtension : Extension
         JObject ditLoaderInputs = new JObject()
         {
             ["model"] = ditModel,
-            ["device"] = "cuda:0",
+            ["device"] = SeedVR2DeviceUtils.GetPrimaryComputeDevice(),
             ["blocks_to_swap"] = blockSwap,
             ["swap_io_components"] = blockSwap > 0,
             ["offload_device"] = ditOffloadDevice,
@@ -1318,7 +1318,7 @@ public class SeedVR2UpscalerExtension : Extension
         JObject vaeLoaderInputs = new JObject()
         {
             ["model"] = "ema_vae_fp16.safetensors",
-            ["device"] = "cuda:0",
+            ["device"] = SeedVR2DeviceUtils.GetPrimaryComputeDevice(),
             ["encode_tiled"] = tiledVAE,
             ["decode_tiled"] = tiledVAE,
             ["offload_device"] = vaeOffloadDevice,
@@ -1553,7 +1553,7 @@ public class SeedVR2UpscalerExtension : Extension
         JObject ditLoaderInputs = new JObject()
         {
             ["model"] = ditModel,
-            ["device"] = "cuda:0",
+            ["device"] = SeedVR2DeviceUtils.GetPrimaryComputeDevice(),
             ["blocks_to_swap"] = blockSwap,
             ["swap_io_components"] = blockSwap > 0,
             ["offload_device"] = ditOffloadDevice,
@@ -1566,7 +1566,7 @@ public class SeedVR2UpscalerExtension : Extension
         JObject vaeLoaderInputs = new JObject()
         {
             ["model"] = "ema_vae_fp16.safetensors",
-            ["device"] = "cuda:0",
+            ["device"] = SeedVR2DeviceUtils.GetPrimaryComputeDevice(),
             ["encode_tiled"] = tiledVAE,
             ["decode_tiled"] = tiledVAE,
             ["offload_device"] = vaeOffloadDevice,

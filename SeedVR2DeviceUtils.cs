@@ -146,6 +146,26 @@ public static class SeedVR2DeviceUtils
         // VAE caching requires offload_device != none.
         return ResolveSeedVR2OffloadDevice(g, offloadParam, requireNotNone: cacheModel, requireNotNoneReason: "'SeedVR2 Cache Model'");
     }
+
+    /// <summary>
+    /// Returns the primary compute device for SeedVR2 model loading.
+    /// Prefers CUDA GPUs, then MPS on macOS, then falls back to CPU.
+    /// </summary>
+    public static string GetPrimaryComputeDevice()
+    {
+        List<string> devices = BuildLocalSeedVR2DeviceList();
+        // Prefer cuda:X (first available GPU), then mps, then cpu
+        string cuda = devices.FirstOrDefault(d => d.StartsWith("cuda:", StringComparison.OrdinalIgnoreCase));
+        if (cuda is not null)
+        {
+            return cuda;
+        }
+        if (devices.Contains("mps"))
+        {
+            return "mps";
+        }
+        return "cpu";
+    }
 }
 
 
