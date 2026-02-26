@@ -90,6 +90,9 @@ public class SeedVR2UpscalerExtension : Extension
     /// <summary>Registered parameter for SeedVR2 image blending method.</summary>
     public static T2IRegisteredParam<string> SeedVR2ImageBlendingMethod;
 
+    /// <summary>Internal marker parameter indicating the image-upscaler subgroup is enabled.</summary>
+    public static T2IRegisteredParam<bool> SeedVR2UseImageUpscalerNode;
+
     /// <summary>Registered parameter for SeedVR2 video file path (for upscaling existing videos).</summary>
     public static T2IRegisteredParam<string> SeedVR2VideoFile;
 
@@ -98,6 +101,9 @@ public class SeedVR2UpscalerExtension : Extension
 
     /// <summary>Parameter group for SeedVR2 settings.</summary>
     public static T2IParamGroup SeedVR2Group;
+
+    /// <summary>Subgroup for optional SeedVR2 image-upscaler node settings.</summary>
+    public static T2IParamGroup SeedVR2ImageUpscalerGroup;
 
     /// <summary>Model filename mapping from UI selection to actual model files.</summary>
     public static readonly Dictionary<string, string> DiTModelMap = new()
@@ -250,9 +256,23 @@ public class SeedVR2UpscalerExtension : Extension
         SeedVR2Group = new("SeedVR2 Upscaler", Toggles: true, Open: false, IsAdvanced: false,
             Description: "Implements <a class=\"translate\" href=\"https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler\">https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler</a>\n" +
             "IMAGE UPSCALING: Enable this group and set 'SeedVR2 Upscale By' to your desired scale.\n" +
-            "If installed, image mode uses <a class=\"translate\" href=\"https://github.com/jtreminio/ComfyUI-SeedVR2_ImageUpscaler\">https://github.com/jtreminio/ComfyUI-SeedVR2_ImageUpscaler</a>.\n" +
             "VIDEO GENERATION: Video mode uses the video-specific SeedVR2 options (batch size, overlap, etc.) and routes to the video upscaler node.\n" +
             "EXISTING MEDIA: Select an image/video in history and click 'SeedVR2 Upscale'.");
+
+        SeedVR2ImageUpscalerGroup = new("SeedVR2 Image Upscaler Node", Toggles: true, Open: false, IsAdvanced: true, Parent: SeedVR2Group,
+            Description: "Image-specific SeedVR2 upscaling with tiling.\nThis is SLOWER but allows you to generate images larger than you normally can.");
+
+        SeedVR2UseImageUpscalerNode = T2IParamTypes.Register<bool>(new(
+            "SeedVR2 Use Image Upscaler Node",
+            "Internal marker for the SeedVR2 Image Upscaler subgroup toggle state.",
+            "true",
+            FeatureFlag: "seedvr2_image_upscaler",
+            Group: SeedVR2ImageUpscalerGroup,
+            VisibleNormally: false,
+            HideFromMetadata: true,
+            DoNotPreview: true,
+            OrderPriority: 0
+        ));
 
         SeedVR2Model = T2IParamTypes.Register<string>(new(
             "SeedVR2 Model",
@@ -454,7 +474,7 @@ public class SeedVR2UpscalerExtension : Extension
             SeedVR2ImageTileUpscaleResolution,
             SeedVR2ImageTilingStrategy,
             SeedVR2ImageAntiAliasingStrength,
-            SeedVR2ImageBlendingMethod) = SeedVR2ImageUpscaler.RegisterParams(SeedVR2Group);
+            SeedVR2ImageBlendingMethod) = SeedVR2ImageUpscaler.RegisterParams(SeedVR2ImageUpscalerGroup);
 
         // Hidden parameters - used internally by the SeedVR2 Upscale button in output history
         // VisibleNormally: false hides them from the UI
@@ -582,6 +602,23 @@ public class SeedVR2UpscalerExtension : Extension
         {
             return true;
         }
+        return false;
+    }
+
+    /// <summary>Returns true when the optional image-upscaler subgroup is enabled and the node is available.</summary>
+    private static bool ShouldUseSeedVR2ImageUpscalerNode(WorkflowGenerator g)
+    {
+        if (!(g.UserInput.TryGet(SeedVR2UseImageUpscalerNode, out bool useImageUpscalerNode) && useImageUpscalerNode))
+        {
+            return false;
+        }
+
+        if (SeedVR2ImageUpscaler.IsAvailable(g))
+        {
+            return true;
+        }
+
+        Logs.Warning("SeedVR2: Image upscaler subgroup enabled, but SeedVR2ImageUpscaler node is unavailable. Falling back to SeedVR2VideoUpscaler.");
         return false;
     }
 
@@ -783,7 +820,7 @@ public class SeedVR2UpscalerExtension : Extension
         }
 
         string upscalerNode;
-        if (SeedVR2ImageUpscaler.IsAvailable(g))
+        if (ShouldUseSeedVR2ImageUpscalerNode(g))
         {
             upscalerNode = SeedVR2ImageUpscaler.CreateNode(g, imageInputForUpscaler, ditLoaderNode, vaeLoaderNode, seed, resolution, colorCorrection, vaeOffloadDevice);
         }
@@ -1095,9 +1132,9 @@ public class SeedVR2UpscalerExtension : Extension
             imageInputForUpscaler = new JArray() { downscaleNode, 0 };
         }
 
-        // 6. Upscale the image (image node when available, otherwise SeedVR2VideoUpscaler fallback)
+        // 6. Upscale the image (optional image node when subgroup is enabled, otherwise SeedVR2VideoUpscaler fallback)
         string upscalerNode;
-        if (SeedVR2ImageUpscaler.IsAvailable(g))
+        if (ShouldUseSeedVR2ImageUpscalerNode(g))
         {
             upscalerNode = SeedVR2ImageUpscaler.CreateNode(g, imageInputForUpscaler, ditLoaderNode, vaeLoaderNode, seed, resolution, colorCorrection, vaeOffloadDevice);
         }
