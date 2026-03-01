@@ -3,6 +3,7 @@
 // Group IDs are derived from group names and only keep lowercase letters:
 // "SeedVR2 Upscaler" => "seedvrupscaler"
 addInstallButton('seedvrupscaler', 'seedvr2_upscaler', 'seedvr2_upscaler', 'Install SeedVR2 Upscaler Node');
+addInstallButton('seedvrupscaler', 'seedvr2_image_upscaler', 'seedvr2_image_upscaler', 'Install SeedVR2 Image Upscaler Node');
 
 // Add SeedVR2 Upscale button to image/video context menus
 (function() {
@@ -69,7 +70,10 @@ addInstallButton('seedvrupscaler', 'seedvr2_upscaler', 'seedvr2_upscaler', 'Inst
                                     'seedvrmodel', 'seedvrupscaleby', 'seedvrresolution', 'seedvrblockswap',
                                     'seedvrcolorcorrection', 'seedvrtwostepmode', 'seedvrpredownscale', 'seedvrtiledvae',
                                     'seedvrlatentnoisescale', 'seedvrinputnoisescale', 'seedvrcachemodel', 'seedvrattentionmode',
-                                    'seedvrvaeoffloaddevice', 'seedvrvideobatchsize', 'seedvrtemporaloverlap', 'seedvruniformbatchsize'
+                                    'seedvrvaeoffloaddevice', 'seedvrvideobatchsize', 'seedvrtemporaloverlap', 'seedvruniformbatchsize',
+                                    'seedvrimagetilesize', 'seedvrimagemaskblur', 'seedvrimagetileoverlap',
+                                    'seedvrimagetileupscaleresolution', 'seedvrimagetilingstrategy', 'seedvrimageantialiasingstrength',
+                                    'seedvrimageblendingmethod',
                                 ];
 
                                 for (let paramId of seedvr2Params) {
