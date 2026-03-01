@@ -661,7 +661,7 @@ public class SeedVR2UpscalerExtension : Extension
         }
 
         // Ensure we have an image to upscale
-        if (g.FinalImageOut is null)
+        if (g.CurrentMedia is null)
         {
             return;
         }
@@ -776,10 +776,10 @@ public class SeedVR2UpscalerExtension : Extension
                 ["empty_cache"] = true,
                 ["gc_collect"] = true,
                 ["unload_all_models"] = true,
-                ["image_pass"] = g.FinalImageOut  // Pass through the image to maintain workflow connection
+                ["image_pass"] = g.CurrentMedia.Path  // Pass through the image to maintain workflow connection
             });
-            // Update FinalImageOut to use the passthrough from VRAM_Debug
-            g.FinalImageOut = new JArray() { vramCleanupNode, 1 };  // output index 1 is image_pass
+            // Update CurrentMedia to use the passthrough from VRAM_Debug
+            g.CurrentMedia = new WGNodeData(new JArray() { vramCleanupNode, 1 }, g, WGNodeData.DT_IMAGE, g.CurrentCompat());  // output index 1 is image_pass
         }
 
         string ditLoaderNode = g.CreateNode("SeedVR2LoadDiTModel", ditLoaderInputs);
@@ -807,12 +807,12 @@ public class SeedVR2UpscalerExtension : Extension
         long seed = g.UserInput.Get(T2IParamTypes.Seed, 42);
 
         // 2-Step Mode: Downscale the image first before feeding to SeedVR2
-        JArray imageInputForUpscaler = g.FinalImageOut;
+        JArray imageInputForUpscaler = g.CurrentMedia.Path;
         if (twoStepMode)
         {
             string downscaleNode = g.CreateNode("ImageScaleBy", new JObject()
             {
-                ["image"] = g.FinalImageOut,
+                ["image"] = g.CurrentMedia.Path,
                 ["upscale_method"] = "lanczos",
                 ["scale_by"] = preDownscale
             });
@@ -848,7 +848,7 @@ public class SeedVR2UpscalerExtension : Extension
         }
 
         // Update final image output to point to upscaler output
-        g.FinalImageOut = new JArray() { upscalerNode, 0 };
+        g.CurrentMedia = new WGNodeData(new JArray() { upscalerNode, 0 }, g, WGNodeData.DT_IMAGE, g.CurrentCompat());
     }
 
     /// <summary>Generates SeedVR2 workflow for upscaling existing image files.</summary>
@@ -1052,13 +1052,13 @@ public class SeedVR2UpscalerExtension : Extension
 
         // === Create workflow nodes ===
 
-        // 1. Load the image - use CreateLoadImageNode for data URLs (supports SwarmLoadImageB64),
-        //    or LoadImage for file paths
+        // 1. Load the image - use LoadImage for data URLs (supports SwarmLoadImageB64),
+        //    or CreateNode for file paths
         string loadImageNode;
         if (isDataUrl && sourceImage is not null)
         {
-            // Use SwarmUI's CreateLoadImageNode which handles base64 images via SwarmLoadImageB64
-            loadImageNode = g.CreateLoadImageNode(sourceImage, "${seedvr2_source_image}", false);
+            // Use SwarmUI's LoadImage which handles base64 images via SwarmLoadImageB64
+            loadImageNode = g.LoadImage(sourceImage, "${seedvr2_source_image}", false).Path[0].ToString();
         }
         else
         {
@@ -1161,8 +1161,8 @@ public class SeedVR2UpscalerExtension : Extension
             upscalerNode = g.CreateNode("SeedVR2VideoUpscaler", upscalerInputs);
         }
 
-        // 7. Set FinalImageOut
-        g.FinalImageOut = new JArray() { upscalerNode, 0 };
+        // 7. Set CurrentMedia
+        g.CurrentMedia = new WGNodeData(new JArray() { upscalerNode, 0 }, g, WGNodeData.DT_IMAGE, g.CurrentCompat());
 
         // 8. Extract source EXIF before replacing data URL (for EXIF preservation)
         // Store in static dictionary (not ExtraMeta) to avoid serialization into image metadata
@@ -1213,7 +1213,7 @@ public class SeedVR2UpscalerExtension : Extension
         }
 
         // 9. Create save node using proper SwarmUI method for metadata handling (fixes issue #12)
-        g.CreateImageSaveNode(g.FinalImageOut);
+        g.CurrentMedia.SaveOutput(g.CurrentVae, null);
 
         // Mark workflow as complete - skip all other generation steps
         g.SkipFurtherSteps = true;
@@ -1499,7 +1499,7 @@ public class SeedVR2UpscalerExtension : Extension
         });
 
         // Mark workflow as complete - skip all other generation steps
-        g.FinalImageOut = new JArray() { upscalerNode, 0 };
+        g.CurrentMedia = new WGNodeData(new JArray() { upscalerNode, 0 }, g, WGNodeData.DT_IMAGE, g.CurrentCompat());
         g.SkipFurtherSteps = true;
 
         Logs.Info($"SeedVR2 Video File: Complete workflow created - loading '{videoFile}', upscaling {seedvrUpscaleBy}x, saving as {codec}-{container}");
@@ -1543,14 +1543,14 @@ public class SeedVR2UpscalerExtension : Extension
         }
 
         // Ensure we have video frames to upscale
-        if (g.FinalImageOut is null)
+        if (g.CurrentMedia is null)
         {
-            Logs.Warning("SeedVR2 Video: No FinalImageOut available to upscale");
+            Logs.Warning("SeedVR2 Video: No CurrentMedia available to upscale");
             return;
         }
 
         // Store the original video frames reference for ReplaceNodeConnection
-        JArray originalVideoFrames = g.FinalImageOut;
+        JArray originalVideoFrames = g.CurrentMedia.Path;
 
         // Determine model variant and settings from selection
         string modelKey = modelChoice.Before("///");
@@ -1745,8 +1745,8 @@ public class SeedVR2UpscalerExtension : Extension
             Logs.Warning("SeedVR2 Video: Could not find save node to update - upscaling may not be applied");
         }
 
-        // Update FinalImageOut for any subsequent steps
-        g.FinalImageOut = upscalerOutput;
+        // Update CurrentMedia for any subsequent steps
+        g.CurrentMedia = new WGNodeData(upscalerOutput, g, WGNodeData.DT_IMAGE, g.CurrentCompat());
 
         Logs.Info($"SeedVR2 Video: Video upscaling workflow complete");
     }
