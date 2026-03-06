@@ -99,6 +99,9 @@ public class SeedVR2UpscalerExtension : Extension
     /// <summary>Registered parameter for SeedVR2 image file path (for upscaling existing images).</summary>
     public static T2IRegisteredParam<string> SeedVR2ImageFile;
 
+    /// <summary>Registered parameter for which pipeline stage SeedVR2 upscaling runs at in multi-stage (T2I→I2V) workflows.</summary>
+    public static T2IRegisteredParam<string> SeedVR2UpscaleStage;
+
     /// <summary>Parameter group for SeedVR2 settings.</summary>
     public static T2IParamGroup SeedVR2Group;
 
@@ -467,6 +470,23 @@ public class SeedVR2UpscalerExtension : Extension
             OrderPriority: 13
         ));
 
+        SeedVR2UpscaleStage = T2IParamTypes.Register<string>(new(
+            "SeedVR2 Upscale Stage",
+            "Controls when SeedVR2 upscaling runs in multi-stage pipelines (e.g. Text-to-Image → Image-to-Video).\n" +
+            "'After Video' (default): upscale the final video frames after generation.\n" +
+            "'Before Video': upscale the intermediate image before it is fed to the video model.\n" +
+            "Only relevant when a Video Model is selected. For image-only or video-only workflows this setting has no effect.",
+            "after_video",
+            GetValues: _ => [
+                "after_video///After Video (Default)",
+                "before_video///Before Video"
+            ],
+            IsAdvanced: true,
+            FeatureFlag: "seedvr2_upscaler",
+            Group: SeedVR2Group,
+            OrderPriority: 13.5
+        ));
+
         // Image-specific parameters (used by SeedVR2 image upscaler nodes)
         (SeedVR2ImageTileSize,
             SeedVR2ImageMaskBlur,
@@ -641,11 +661,16 @@ public class SeedVR2UpscalerExtension : Extension
             return;
         }
 
-        // Skip video generation mode - handled by GenerateSeedVR2VideoGenerationWorkflow at priority 15
-        // (Video generation happens at priority 11, so we can't intercept it here at priority 6)
+        // For multi-stage pipelines (T2I→I2V), check whether the user wants upscaling before or after video.
+        // "before_video" means we upscale the image here at priority 6 before the I2V step at priority 11.
+        // "after_video" (default) defers to GenerateSeedVR2VideoGenerationWorkflow at priority 15.
         if (IsSeedVR2VideoGenerationRequest(g))
         {
-            return;
+            string stage = g.UserInput.Get(SeedVR2UpscaleStage, "after_video").Before("///");
+            if (stage != "before_video")
+            {
+                return;
+            }
         }
 
         // Only activate if the group toggle is enabled
@@ -1532,6 +1557,13 @@ public class SeedVR2UpscalerExtension : Extension
 
         // Only activate if the SeedVR2 group toggle is enabled
         if (!g.UserInput.TryGet(SeedVR2Model, out string modelChoice))
+        {
+            return;
+        }
+
+        // Skip if user chose to upscale before video - already handled at priority 6
+        string stage = g.UserInput.Get(SeedVR2UpscaleStage, "after_video").Before("///");
+        if (stage == "before_video")
         {
             return;
         }
