@@ -9,13 +9,11 @@ on:
     # Nightly at 06:00 UTC - catches upstream SwarmUI API breakage
     - cron: '0 6 * * *'
 
-permissions:
-  contents: read
-  issues: write
-
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout extension
         uses: actions/checkout@v4
@@ -77,8 +75,14 @@ jobs:
 
           echo "Extension built successfully with 0 warnings"
 
+  notify:
+    needs: build
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
       - name: Create issue on nightly failure
-        if: failure() && github.event_name == 'schedule'
         uses: actions/github-script@v7
         with:
           script: |
