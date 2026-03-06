@@ -9,6 +9,10 @@ on:
     # Nightly at 06:00 UTC - catches upstream SwarmUI API breakage
     - cron: '0 6 * * *'
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -59,9 +63,9 @@ jobs:
             "-p:BaseIntermediateOutputPath=$(pwd)/$OBJ_DIR/;TargetName=SwarmExtensionSwarmUI-SeedVR2Upscaler" \
             2>&1 | tee build_ext.log
 
-          # Fail on any warnings (catches deprecation issues like #17)
+          # Fail on C# compiler warnings (catches deprecation issues like #17)
           if grep -q "warning CS" build_ext.log; then
-            echo "::error::Extension build produced C# warnings"
+            echo "::error::Extension build produced C# compiler warnings"
             exit 1
           fi
 
