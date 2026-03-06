@@ -1561,9 +1561,12 @@ public class SeedVR2UpscalerExtension : Extension
             return;
         }
 
-        // Skip if user chose to upscale before video - already handled at priority 6
+        // Skip if user chose to upscale before video AND this is a multi-stage pipeline (T2I→I2V).
+        // In multi-stage mode, "before_video" means the image was already upscaled at priority 6.
+        // For direct video models (g.IsVideoModel()), there's no intermediate image at priority 6,
+        // so we must still upscale the video frames here regardless of the stage setting.
         string stage = g.UserInput.Get(SeedVR2UpscaleStage, "after_video").Before("///");
-        if (stage == "before_video")
+        if (stage == "before_video" && !g.IsVideoModel() && g.UserInput.TryGet(T2IParamTypes.VideoModel, out _))
         {
             return;
         }
