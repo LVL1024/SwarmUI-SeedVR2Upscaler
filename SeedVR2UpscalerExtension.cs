@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.IO;
+using System.Runtime.CompilerServices;
 using System.Linq;
 using FreneticUtilities.FreneticExtensions;
 using Newtonsoft.Json.Linq;
@@ -137,6 +138,9 @@ public class SeedVR2UpscalerExtension : Extension
 
     /// <summary>Temporary storage for source EXIF profiles, keyed by request ID. Avoids serialization into image metadata.</summary>
     private static readonly ConcurrentDictionary<long, byte[]> PendingSourceExif = new();
+
+    /// <summary>Tracks workflow generators where the pre-video image upscale (priority 6) actually ran, so priority 15 can skip.</summary>
+    private static readonly ConditionalWeakTable<WorkflowGenerator, object> PreVideoUpscaleRan = new();
 
     /// <summary>Gets the SwarmUI model directory path for SeedVR2 models.</summary>
     public static string GetSeedVR2ModelDirectory()
@@ -874,6 +878,12 @@ public class SeedVR2UpscalerExtension : Extension
 
         // Update final image output to point to upscaler output
         g.CurrentMedia = new WGNodeData(new JArray() { upscalerNode, 0 }, g, WGNodeData.DT_IMAGE, g.CurrentCompat());
+
+        // Mark that the pre-video upscale ran so priority 15 can skip
+        if (IsSeedVR2VideoGenerationRequest(g))
+        {
+            PreVideoUpscaleRan.Add(g, g);
+        }
     }
 
     /// <summary>Generates SeedVR2 workflow for upscaling existing image files.</summary>
@@ -1561,12 +1571,11 @@ public class SeedVR2UpscalerExtension : Extension
             return;
         }
 
-        // Skip if user chose to upscale before video AND this is a multi-stage pipeline (T2I→I2V).
-        // In multi-stage mode, "before_video" means the image was already upscaled at priority 6.
-        // For direct video models (g.IsVideoModel()), there's no intermediate image at priority 6,
-        // so we must still upscale the video frames here regardless of the stage setting.
+        // Skip if the priority-6 step already upscaled the intermediate image for this generator.
+        // This is more reliable than inferring from model type, since some models may or may
+        // not have a decodable image at priority 6 depending on pipeline configuration.
         string stage = g.UserInput.Get(SeedVR2UpscaleStage, "after_video").Before("///");
-        if (stage == "before_video" && !g.IsVideoModel() && g.UserInput.TryGet(T2IParamTypes.VideoModel, out _))
+        if (stage == "before_video" && PreVideoUpscaleRan.TryGetValue(g, out _))
         {
             return;
         }
