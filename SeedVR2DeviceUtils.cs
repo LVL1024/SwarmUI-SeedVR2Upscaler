@@ -36,7 +36,7 @@ public static class SeedVR2DeviceUtils
         return merged;
     }
 
-    /// <summary>Cached ROCm GPU count. Null means not yet queried; -1 means rocm-smi unavailable.</summary>
+    /// <summary>Cached ROCm GPU count. Null means not yet queried; 0 means unavailable or none detected.</summary>
     private static int? _cachedRocmGpuCount = null;
 
     /// <summary>
@@ -64,14 +64,22 @@ public static class SeedVR2DeviceUtils
                 _cachedRocmGpuCount = 0;
                 return 0;
             }
-            // Read all stdout before WaitForExit to avoid stdout pipe deadlock
-            string output = p.StandardOutput.ReadToEnd();
-            p.WaitForExit(5000);
+            // Read stdout asynchronously with a 5s timeout to prevent hanging if rocm-smi stalls.
+            // ReadToEnd() alone can block indefinitely, so we race it against the timeout.
+            Task<string> readTask = p.StandardOutput.ReadToEndAsync();
+            if (!readTask.Wait(5000))
+            {
+                p.Kill();
+                _cachedRocmGpuCount = 0;
+                return 0;
+            }
+            p.WaitForExit(1000);
             if (!p.HasExited || p.ExitCode != 0)
             {
                 _cachedRocmGpuCount = 0;
                 return 0;
             }
+            string output = readTask.Result;
             int count = 0;
             bool firstLine = true;
             foreach (string line in output.Split('\n'))
