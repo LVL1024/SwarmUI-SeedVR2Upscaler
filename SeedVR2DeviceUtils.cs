@@ -51,6 +51,12 @@ public static class SeedVR2DeviceUtils
     /// <summary>One-time rocm-smi probe backing <see cref="_rocmGpuCount"/>.</summary>
     private static int ProbeRocmGpuCount()
     {
+        const int BudgetMs = 5000;
+        System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+        Process p = null;
+        Task<string> stdoutTask = null;
+        Task stderrTask = null;
+        bool succeeded = false;
         try
         {
             ProcessStartInfo psi = new("rocm-smi", "--showid --csv")
@@ -60,28 +66,24 @@ public static class SeedVR2DeviceUtils
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
-            using Process p = Process.Start(psi);
+            p = Process.Start(psi);
             if (p is null)
             {
                 return 0;
             }
-            // Drain both stdout and stderr concurrently to prevent pipe buffer deadlocks,
-            // and race both against a 5s timeout in case rocm-smi hangs.
-            Task<string> stdoutTask = p.StandardOutput.ReadToEndAsync();
-            Task stderrTask = p.StandardError.ReadToEndAsync();
-            if (!Task.WhenAll(stdoutTask, stderrTask).Wait(5000))
+            // Drain stdout and stderr concurrently to prevent pipe buffer deadlocks.
+            // Each wait uses the remaining fraction of the overall 5s budget.
+            stdoutTask = p.StandardOutput.ReadToEndAsync();
+            stderrTask = p.StandardError.ReadToEndAsync();
+            int ioRemaining = BudgetMs - (int)sw.ElapsedMilliseconds;
+            if (ioRemaining <= 0 || !Task.WhenAll(stdoutTask, stderrTask).Wait(ioRemaining))
             {
-                KillProcess(p);
-                // Wait for read tasks to finish/fault after kill so they are observed
-                // before the Process is disposed. Kill closes the pipe, so this should be fast.
-                try { Task.WhenAll(stdoutTask, stderrTask).Wait(2000); } catch { }
-                return 0;
+                return 0; // finally kills and observes tasks
             }
-            p.WaitForExit(1000);
-            if (!p.HasExited)
+            int exitRemaining = BudgetMs - (int)sw.ElapsedMilliseconds;
+            if (exitRemaining <= 0 || !p.WaitForExit(exitRemaining))
             {
-                KillProcess(p);
-                return 0;
+                return 0; // finally kills
             }
             if (p.ExitCode != 0)
             {
@@ -97,11 +99,24 @@ public static class SeedVR2DeviceUtils
                     count++;
                 }
             }
+            succeeded = true;
             return count;
         }
         catch
         {
             return 0;
+        }
+        finally
+        {
+            if (!succeeded && p is not null)
+            {
+                // Ensure the process is terminated on every non-success path, including exceptions.
+                // Disposing Process does not kill the child — explicit kill is required.
+                KillProcess(p);
+                // Observe in-flight read tasks so their exceptions don't go unobserved.
+                try { Task.WhenAll(stdoutTask ?? Task.CompletedTask, stderrTask ?? Task.CompletedTask).Wait(1000); } catch { }
+            }
+            p?.Dispose();
         }
     }
 
