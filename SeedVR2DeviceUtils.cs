@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using FreneticUtilities.FreneticExtensions;
 using SwarmUI.Accounts;
@@ -36,7 +37,42 @@ public static class SeedVR2DeviceUtils
     }
 
     /// <summary>
+    /// Attempts to count AMD GPUs via rocm-smi. Returns 0 if rocm-smi is unavailable or fails.
+    /// On ROCm systems, AMD GPUs are exposed to PyTorch as cuda:X devices, mirroring CUDA indexing.
+    /// </summary>
+    public static int CountRocmGpus()
+    {
+        try
+        {
+            ProcessStartInfo psi = new("rocm-smi", "--showid --csv")
+            {
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            Process p = Process.Start(psi);
+            if (p is null)
+            {
+                return 0;
+            }
+            p.WaitForExit();
+            int count = 0;
+            p.StandardOutput.ReadLine(); // skip header
+            while (!string.IsNullOrWhiteSpace(p.StandardOutput.ReadLine()))
+            {
+                count++;
+            }
+            return count;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>
     /// Local replica of SeedVR2's python get_device_list() behavior (memory_manager.get_device_list).
+    /// Detects NVIDIA GPUs (via nvidia-smi), AMD GPUs (via rocm-smi), and Apple MPS.
     /// </summary>
     public static List<string> BuildLocalSeedVR2DeviceList()
     {
@@ -60,6 +96,28 @@ public static class SeedVR2DeviceUtils
         catch
         {
             // ignore
+        }
+
+        // ROCm: enumerate AMD GPUs (exposed as cuda:X in PyTorch)
+        // Only check if no NVIDIA GPUs were found (mixed setups are extremely rare)
+        if (!hasCuda)
+        {
+            try
+            {
+                int rocmCount = CountRocmGpus();
+                if (rocmCount > 0)
+                {
+                    hasCuda = true;
+                    for (int i = 0; i < rocmCount; i++)
+                    {
+                        devs.Add($"cuda:{i}");
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
         }
 
         // MPS: best-effort detection (python checks torch.backends.mps.is_available()).
@@ -149,7 +207,7 @@ public static class SeedVR2DeviceUtils
 
     /// <summary>
     /// Returns the primary compute device for SeedVR2 model loading.
-    /// Prefers CUDA GPUs, then MPS on macOS, then falls back to CPU.
+    /// Prefers CUDA GPUs (NVIDIA or AMD ROCm, both exposed as cuda:X), then MPS on macOS, then falls back to CPU.
     /// </summary>
     public static string GetPrimaryComputeDevice()
     {
