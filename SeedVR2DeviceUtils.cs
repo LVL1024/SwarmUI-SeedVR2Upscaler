@@ -36,53 +36,57 @@ public static class SeedVR2DeviceUtils
         return merged;
     }
 
-    /// <summary>Cached ROCm GPU count. Null means not yet queried; 0 means unavailable or none detected.</summary>
-    private static int? _cachedRocmGpuCount = null;
+    /// <summary>
+    /// Thread-safe cached probe for AMD GPU count via rocm-smi.
+    /// Lazy ensures only one rocm-smi process is ever spawned regardless of concurrent callers.
+    /// </summary>
+    private static readonly Lazy<int> _rocmGpuCount = new(ProbeRocmGpuCount);
 
     /// <summary>
     /// Attempts to count AMD GPUs via rocm-smi. Returns 0 if rocm-smi is unavailable or fails.
     /// On ROCm systems, AMD GPUs are exposed to PyTorch as cuda:X devices, mirroring CUDA indexing.
-    /// Result is cached since GPU count does not change while the server is running.
     /// </summary>
-    private static int CountRocmGpus()
+    private static int CountRocmGpus() => _rocmGpuCount.Value;
+
+    /// <summary>One-time rocm-smi probe backing <see cref="_rocmGpuCount"/>.</summary>
+    private static int ProbeRocmGpuCount()
     {
-        if (_cachedRocmGpuCount.HasValue)
-        {
-            return _cachedRocmGpuCount.Value;
-        }
         try
         {
             ProcessStartInfo psi = new("rocm-smi", "--showid --csv")
             {
                 RedirectStandardOutput = true,
+                RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
             using Process p = Process.Start(psi);
             if (p is null)
             {
-                _cachedRocmGpuCount = 0;
                 return 0;
             }
-            // Read stdout asynchronously with a 5s timeout to prevent hanging if rocm-smi stalls.
-            // ReadToEnd() alone can block indefinitely, so we race it against the timeout.
-            Task<string> readTask = p.StandardOutput.ReadToEndAsync();
-            if (!readTask.Wait(5000))
+            // Drain both stdout and stderr concurrently to prevent pipe buffer deadlocks,
+            // and race both against a 5s timeout in case rocm-smi hangs.
+            Task<string> stdoutTask = p.StandardOutput.ReadToEndAsync();
+            Task stderrTask = p.StandardError.ReadToEndAsync();
+            if (!Task.WhenAll(stdoutTask, stderrTask).Wait(5000))
             {
-                p.Kill();
-                _cachedRocmGpuCount = 0;
+                KillProcess(p);
                 return 0;
             }
             p.WaitForExit(1000);
-            if (!p.HasExited || p.ExitCode != 0)
+            if (!p.HasExited)
             {
-                _cachedRocmGpuCount = 0;
+                KillProcess(p);
                 return 0;
             }
-            string output = readTask.Result;
+            if (p.ExitCode != 0)
+            {
+                return 0;
+            }
             int count = 0;
             bool firstLine = true;
-            foreach (string line in output.Split('\n'))
+            foreach (string line in stdoutTask.Result.Split('\n'))
             {
                 if (firstLine) { firstLine = false; continue; } // skip header
                 if (!string.IsNullOrWhiteSpace(line))
@@ -90,13 +94,28 @@ public static class SeedVR2DeviceUtils
                     count++;
                 }
             }
-            _cachedRocmGpuCount = count;
             return count;
         }
         catch
         {
-            _cachedRocmGpuCount = 0;
             return 0;
+        }
+    }
+
+    /// <summary>Kills a process safely, ignoring errors if it has already exited.</summary>
+    private static void KillProcess(Process p)
+    {
+        try
+        {
+            if (!p.HasExited)
+            {
+                p.Kill(entireProcessTree: true);
+                p.WaitForExit();
+            }
+        }
+        catch
+        {
+            // ignore — process may have exited between HasExited check and Kill
         }
     }
 
