@@ -112,8 +112,8 @@ public static class SeedVR2DeviceUtils
             // from other launch errors like permission denied or transient env issues (transient).
             // Win32Exception with NativeErrorCode 2 = ENOENT/ERROR_FILE_NOT_FOUND = not installed.
             try { p = Process.Start(psi); }
-            catch (Win32Exception ex) when (ex.NativeErrorCode == 2) { return (0, true); }  // not installed — permanent
-            catch { return (0, false); }                                                      // other launch error — transient
+            catch (Win32Exception ex) when (ex.NativeErrorCode == 2) { return ProbeHipInfoGpuCount(); }  // rocm-smi absent — try hipInfo fallback
+            catch { return (0, false); }                                                                  // other launch error — transient
             if (p is null)
             {
                 return (0, true);
@@ -161,6 +161,78 @@ public static class SeedVR2DeviceUtils
                 // Disposing Process does not kill the child — explicit kill is required.
                 KillProcess(p);
                 // Observe in-flight read tasks so their exceptions don't go unobserved.
+                try { Task.WhenAll(stdoutTask ?? Task.CompletedTask, stderrTask ?? Task.CompletedTask).Wait(1000); } catch { }
+            }
+            p?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Fallback GPU probe using hipInfo.exe, which ships with the AMD HIP SDK for Windows.
+    /// Run with no arguments; counts output lines starting with "device#", one per GPU.
+    /// Example output line: "device#                           0"
+    /// Returns (count, permanent) using the same semantics as <see cref="ProbeRocmGpuCount"/>.
+    /// </summary>
+    private static (int Count, bool Permanent) ProbeHipInfoGpuCount()
+    {
+        const int BudgetMs = 5000;
+        Stopwatch sw = Stopwatch.StartNew();
+        Process p = null;
+        Task<string> stdoutTask = null;
+        Task stderrTask = null;
+        bool definitive = false;
+        try
+        {
+            ProcessStartInfo psi = new("hipInfo")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            try { p = Process.Start(psi); }
+            catch (Win32Exception ex) when (ex.NativeErrorCode == 2) { return (0, true); }  // hipInfo not installed — permanent
+            catch { return (0, false); }                                                      // other launch error — transient
+            if (p is null)
+            {
+                return (0, true);
+            }
+            stdoutTask = p.StandardOutput.ReadToEndAsync();
+            stderrTask = p.StandardError.ReadToEndAsync();
+            int ioRemaining = BudgetMs - (int)sw.ElapsedMilliseconds;
+            if (ioRemaining <= 0 || !Task.WhenAll(stdoutTask, stderrTask).Wait(ioRemaining))
+            {
+                return (0, false); // transient timeout
+            }
+            int exitRemaining = BudgetMs - (int)sw.ElapsedMilliseconds;
+            if (exitRemaining <= 0 || !p.WaitForExit(exitRemaining))
+            {
+                return (0, false); // transient timeout
+            }
+            if (p.ExitCode != 0)
+            {
+                return (0, false); // unexpected exit code — transient
+            }
+            int count = 0;
+            foreach (string line in stdoutTask.Result.Split('\n'))
+            {
+                if (line.TrimStart().StartsWith("device#", StringComparison.OrdinalIgnoreCase))
+                {
+                    count++;
+                }
+            }
+            definitive = true;
+            return (count, true);
+        }
+        catch
+        {
+            return (0, false);
+        }
+        finally
+        {
+            if (!definitive && p is not null)
+            {
+                KillProcess(p);
                 try { Task.WhenAll(stdoutTask ?? Task.CompletedTask, stderrTask ?? Task.CompletedTask).Wait(1000); } catch { }
             }
             p?.Dispose();
