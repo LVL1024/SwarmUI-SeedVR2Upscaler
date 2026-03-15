@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
 using FreneticUtilities.FreneticExtensions;
@@ -43,16 +44,22 @@ public static class SeedVR2DeviceUtils
     private static readonly object _rocmProbeLock = new();
 
     /// <summary>
-    /// Cached ROCm GPU count. Null means not yet probed or last probe was transient (will retry).
+    /// Cached ROCm GPU count. Null means not yet probed or last probe was transient (will retry after backoff).
     /// Set to a non-null value only on definitive results: rocm-smi not installed, or successful probe.
     /// </summary>
     private static int? _rocmCache = null;
 
     /// <summary>
+    /// Environment.TickCount64 value after which a transient failure may be retried.
+    /// Zero means no backoff is active.
+    /// </summary>
+    private static long _rocmRetryAfter = 0;
+
+    /// <summary>
     /// Attempts to count AMD GPUs via rocm-smi. Returns 0 if rocm-smi is unavailable or fails.
     /// On ROCm systems, AMD GPUs are exposed to PyTorch as cuda:X devices, mirroring CUDA indexing.
     /// Definitive results (rocm-smi absent, or successful probe) are cached permanently.
-    /// Transient failures (timeout, unexpected exit code) leave the cache null so the next call retries.
+    /// Transient failures (timeout, unexpected exit code) apply a 60s backoff before the next retry.
     /// </summary>
     private static int CountRocmGpus()
     {
@@ -62,10 +69,18 @@ public static class SeedVR2DeviceUtils
             {
                 return _rocmCache.Value;
             }
+            if (_rocmRetryAfter != 0 && Environment.TickCount64 < _rocmRetryAfter)
+            {
+                return 0; // backoff active — skip probe and return 0
+            }
             (int count, bool permanent) = ProbeRocmGpuCount();
             if (permanent)
             {
                 _rocmCache = count;
+            }
+            else
+            {
+                _rocmRetryAfter = Environment.TickCount64 + 60_000; // retry in 60s
             }
             return count;
         }
@@ -93,10 +108,12 @@ public static class SeedVR2DeviceUtils
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
-            // Catch process-launch failure separately so we can mark it as permanent
-            // (rocm-smi is not installed — no point retrying).
+            // Catch process-launch failures separately to distinguish "not installed" (permanent)
+            // from other launch errors like permission denied or transient env issues (transient).
+            // Win32Exception with NativeErrorCode 2 = ENOENT/ERROR_FILE_NOT_FOUND = not installed.
             try { p = Process.Start(psi); }
-            catch { return (0, true); }
+            catch (Win32Exception ex) when (ex.NativeErrorCode == 2) { return (0, true); }  // not installed — permanent
+            catch { return (0, false); }                                                      // other launch error — transient
             if (p is null)
             {
                 return (0, true);
@@ -173,7 +190,8 @@ public static class SeedVR2DeviceUtils
 
     /// <summary>
     /// Local replica of SeedVR2's python get_device_list() behavior (memory_manager.get_device_list).
-    /// Detects NVIDIA GPUs (via nvidia-smi), AMD GPUs (via rocm-smi), and Apple MPS.
+    /// Detects NVIDIA GPUs (via nvidia-smi), or AMD ROCm GPUs (via rocm-smi) when no NVIDIA GPUs are present,
+    /// or Apple MPS on macOS. Mixed NVIDIA+AMD systems will only list NVIDIA devices.
     /// </summary>
     public static List<string> BuildLocalSeedVR2DeviceList()
     {
