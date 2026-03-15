@@ -94,7 +94,7 @@ public static class SeedVR2DeviceUtils
     private static (int Count, bool Permanent) ProbeRocmGpuCount()
     {
         const int BudgetMs = 5000;
-        System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+        Stopwatch sw = Stopwatch.StartNew();
         Process p = null;
         Task<string> stdoutTask = null;
         Task stderrTask = null;
