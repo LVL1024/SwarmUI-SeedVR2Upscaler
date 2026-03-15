@@ -36,12 +36,20 @@ public static class SeedVR2DeviceUtils
         return merged;
     }
 
+    /// <summary>Cached ROCm GPU count. Null means not yet queried; -1 means rocm-smi unavailable.</summary>
+    private static int? _cachedRocmGpuCount = null;
+
     /// <summary>
     /// Attempts to count AMD GPUs via rocm-smi. Returns 0 if rocm-smi is unavailable or fails.
     /// On ROCm systems, AMD GPUs are exposed to PyTorch as cuda:X devices, mirroring CUDA indexing.
+    /// Result is cached since GPU count does not change while the server is running.
     /// </summary>
-    public static int CountRocmGpus()
+    private static int CountRocmGpus()
     {
+        if (_cachedRocmGpuCount.HasValue)
+        {
+            return _cachedRocmGpuCount.Value;
+        }
         try
         {
             ProcessStartInfo psi = new("rocm-smi", "--showid --csv")
@@ -50,22 +58,36 @@ public static class SeedVR2DeviceUtils
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
-            Process p = Process.Start(psi);
+            using Process p = Process.Start(psi);
             if (p is null)
             {
+                _cachedRocmGpuCount = 0;
                 return 0;
             }
-            p.WaitForExit();
-            int count = 0;
-            p.StandardOutput.ReadLine(); // skip header
-            while (!string.IsNullOrWhiteSpace(p.StandardOutput.ReadLine()))
+            // Read all stdout before WaitForExit to avoid stdout pipe deadlock
+            string output = p.StandardOutput.ReadToEnd();
+            p.WaitForExit(5000);
+            if (!p.HasExited || p.ExitCode != 0)
             {
-                count++;
+                _cachedRocmGpuCount = 0;
+                return 0;
             }
+            int count = 0;
+            bool firstLine = true;
+            foreach (string line in output.Split('\n'))
+            {
+                if (firstLine) { firstLine = false; continue; } // skip header
+                if (!string.IsNullOrWhiteSpace(line))
+                {
+                    count++;
+                }
+            }
+            _cachedRocmGpuCount = count;
             return count;
         }
         catch
         {
+            _cachedRocmGpuCount = 0;
             return 0;
         }
     }
@@ -102,21 +124,14 @@ public static class SeedVR2DeviceUtils
         // Only check if no NVIDIA GPUs were found (mixed setups are extremely rare)
         if (!hasCuda)
         {
-            try
+            int rocmCount = CountRocmGpus();
+            if (rocmCount > 0)
             {
-                int rocmCount = CountRocmGpus();
-                if (rocmCount > 0)
+                hasCuda = true;
+                for (int i = 0; i < rocmCount; i++)
                 {
-                    hasCuda = true;
-                    for (int i = 0; i < rocmCount; i++)
-                    {
-                        devs.Add($"cuda:{i}");
-                    }
+                    devs.Add($"cuda:{i}");
                 }
-            }
-            catch
-            {
-                // ignore
             }
         }
 
