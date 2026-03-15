@@ -37,26 +37,53 @@ public static class SeedVR2DeviceUtils
     }
 
     /// <summary>
-    /// Thread-safe cached probe for AMD GPU count via rocm-smi.
-    /// Lazy ensures only one rocm-smi process is ever spawned regardless of concurrent callers.
+    /// Lock protecting <see cref="_rocmCache"/>.
+    /// A lock (rather than Lazy) is used so transient failures can be retried on the next call.
     /// </summary>
-    private static readonly Lazy<int> _rocmGpuCount = new(ProbeRocmGpuCount);
+    private static readonly object _rocmProbeLock = new();
+
+    /// <summary>
+    /// Cached ROCm GPU count. Null means not yet probed or last probe was transient (will retry).
+    /// Set to a non-null value only on definitive results: rocm-smi not installed, or successful probe.
+    /// </summary>
+    private static int? _rocmCache = null;
 
     /// <summary>
     /// Attempts to count AMD GPUs via rocm-smi. Returns 0 if rocm-smi is unavailable or fails.
     /// On ROCm systems, AMD GPUs are exposed to PyTorch as cuda:X devices, mirroring CUDA indexing.
+    /// Definitive results (rocm-smi absent, or successful probe) are cached permanently.
+    /// Transient failures (timeout, unexpected exit code) leave the cache null so the next call retries.
     /// </summary>
-    private static int CountRocmGpus() => _rocmGpuCount.Value;
+    private static int CountRocmGpus()
+    {
+        lock (_rocmProbeLock)
+        {
+            if (_rocmCache.HasValue)
+            {
+                return _rocmCache.Value;
+            }
+            (int count, bool permanent) = ProbeRocmGpuCount();
+            if (permanent)
+            {
+                _rocmCache = count;
+            }
+            return count;
+        }
+    }
 
-    /// <summary>One-time rocm-smi probe backing <see cref="_rocmGpuCount"/>.</summary>
-    private static int ProbeRocmGpuCount()
+    /// <summary>
+    /// Runs rocm-smi to count AMD GPUs. Returns (count, permanent) where permanent=true means
+    /// the result is definitive and should be cached (rocm-smi not installed, or clean success/0-GPU result);
+    /// permanent=false means a transient failure occurred and the caller should retry next time.
+    /// </summary>
+    private static (int Count, bool Permanent) ProbeRocmGpuCount()
     {
         const int BudgetMs = 5000;
         System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
         Process p = null;
         Task<string> stdoutTask = null;
         Task stderrTask = null;
-        bool succeeded = false;
+        bool definitive = false;
         try
         {
             ProcessStartInfo psi = new("rocm-smi", "--showid --csv")
@@ -66,10 +93,13 @@ public static class SeedVR2DeviceUtils
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
-            p = Process.Start(psi);
+            // Catch process-launch failure separately so we can mark it as permanent
+            // (rocm-smi is not installed — no point retrying).
+            try { p = Process.Start(psi); }
+            catch { return (0, true); }
             if (p is null)
             {
-                return 0;
+                return (0, true);
             }
             // Drain stdout and stderr concurrently to prevent pipe buffer deadlocks.
             // Each wait uses the remaining fraction of the overall 5s budget.
@@ -78,16 +108,16 @@ public static class SeedVR2DeviceUtils
             int ioRemaining = BudgetMs - (int)sw.ElapsedMilliseconds;
             if (ioRemaining <= 0 || !Task.WhenAll(stdoutTask, stderrTask).Wait(ioRemaining))
             {
-                return 0; // finally kills and observes tasks
+                return (0, false); // transient timeout — finally kills and observes tasks
             }
             int exitRemaining = BudgetMs - (int)sw.ElapsedMilliseconds;
             if (exitRemaining <= 0 || !p.WaitForExit(exitRemaining))
             {
-                return 0; // finally kills
+                return (0, false); // transient timeout — finally kills
             }
             if (p.ExitCode != 0)
             {
-                return 0;
+                return (0, false); // unexpected exit code — treat as transient
             }
             int count = 0;
             bool firstLine = true;
@@ -99,16 +129,16 @@ public static class SeedVR2DeviceUtils
                     count++;
                 }
             }
-            succeeded = true;
-            return count;
+            definitive = true;
+            return (count, true); // clean result (including 0 GPUs) — cache permanently
         }
         catch
         {
-            return 0;
+            return (0, false); // unexpected exception — treat as transient
         }
         finally
         {
-            if (!succeeded && p is not null)
+            if (!definitive && p is not null)
             {
                 // Ensure the process is terminated on every non-success path, including exceptions.
                 // Disposing Process does not kill the child — explicit kill is required.
