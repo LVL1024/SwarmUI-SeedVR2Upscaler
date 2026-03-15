@@ -168,6 +168,40 @@ public static class SeedVR2DeviceUtils
     }
 
     /// <summary>
+    /// On Windows, attempts to locate hipInfo.exe by inspecting the venv Scripts folder of any
+    /// running ComfyUI self-start backend. hipInfo.exe ships with the AMD HIP SDK and is placed
+    /// alongside python.exe in the venv. Falls back to a plain PATH lookup if not found that way.
+    /// Returns null only if hipInfo.exe cannot be found at all.
+    /// </summary>
+    private static string FindHipInfoPath()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return "hipInfo"; // Linux: rely on PATH
+        }
+        foreach (ComfyUISelfStartBackend backend in Program.Backends.RunningBackendsOfType<ComfyUISelfStartBackend>())
+        {
+            string script = backend.Settings?.StartScript?.Replace('\\', '/');
+            if (string.IsNullOrEmpty(script))
+            {
+                continue;
+            }
+            string dir = Path.GetDirectoryName(script);
+            string venvPath = Path.GetFullPath($"{dir}/venv/Scripts/hipInfo.exe");
+            if (File.Exists(venvPath))
+            {
+                return venvPath;
+            }
+            string embedPath = Path.GetFullPath($"{dir}/../python_embeded/Scripts/hipInfo.exe");
+            if (File.Exists(embedPath))
+            {
+                return embedPath;
+            }
+        }
+        return "hipInfo"; // fall back to PATH
+    }
+
+    /// <summary>
     /// Fallback GPU probe using hipInfo.exe, which ships with the AMD HIP SDK for Windows.
     /// Run with no arguments; counts output lines starting with "device#", one per GPU.
     /// Example output line: "device#                           0"
@@ -183,7 +217,8 @@ public static class SeedVR2DeviceUtils
         bool definitive = false;
         try
         {
-            ProcessStartInfo psi = new("hipInfo")
+            string hipInfoExe = FindHipInfoPath();
+            ProcessStartInfo psi = new(hipInfoExe)
             {
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
