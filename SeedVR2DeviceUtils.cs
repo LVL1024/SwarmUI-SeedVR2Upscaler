@@ -72,6 +72,9 @@ public static class SeedVR2DeviceUtils
             if (!Task.WhenAll(stdoutTask, stderrTask).Wait(5000))
             {
                 KillProcess(p);
+                // Wait for read tasks to finish/fault after kill so they are observed
+                // before the Process is disposed. Kill closes the pipe, so this should be fast.
+                try { Task.WhenAll(stdoutTask, stderrTask).Wait(2000); } catch { }
                 return 0;
             }
             p.WaitForExit(1000);
@@ -102,7 +105,11 @@ public static class SeedVR2DeviceUtils
         }
     }
 
-    /// <summary>Kills a process safely, ignoring errors if it has already exited.</summary>
+    /// <summary>
+    /// Kills a process safely, ignoring errors if it has already exited.
+    /// Uses a bounded wait after kill to avoid blocking indefinitely on processes
+    /// stuck in uninterruptible sleep.
+    /// </summary>
     private static void KillProcess(Process p)
     {
         try
@@ -110,7 +117,7 @@ public static class SeedVR2DeviceUtils
             if (!p.HasExited)
             {
                 p.Kill(entireProcessTree: true);
-                p.WaitForExit();
+                p.WaitForExit(2000); // bounded — process may linger in uninterruptible sleep
             }
         }
         catch
