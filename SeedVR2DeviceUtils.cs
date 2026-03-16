@@ -169,34 +169,43 @@ public static class SeedVR2DeviceUtils
     }
 
     /// <summary>
-    /// On Windows, attempts to locate hipInfo.exe by inspecting the venv Scripts folder of any
-    /// running ComfyUI self-start backend. hipInfo.exe ships with the AMD HIP SDK and is placed
-    /// alongside python.exe in the venv. Falls back to a plain PATH lookup if not found that way.
-    /// Returns null only if hipInfo.exe cannot be found at all.
+    /// On Windows, attempts to locate hipInfo.exe alongside the ComfyUI Python executable.
+    /// hipInfo.exe ships with the AMD HIP SDK and is placed in the same Scripts folder as python.exe.
+    /// Uses NetworkBackendUtils.ConfigurePythonExeFor (the same logic SwarmUI uses) to resolve
+    /// the Python executable path, then checks for hipInfo.exe next to it.
+    /// Falls back to a plain "hipInfo" PATH lookup if not found.
     /// </summary>
     private static string FindHipInfoPath()
     {
         if (!OperatingSystem.IsWindows())
         {
-            return "hipInfo"; // Linux: rely on PATH
+            return "hipInfo"; // Linux/macOS: rely on PATH
         }
         foreach (ComfyUISelfStartBackend backend in Program.Backends.RunningBackendsOfType<ComfyUISelfStartBackend>())
         {
-            string script = backend.Settings?.StartScript?.Replace('\\', '/');
+            string script = backend.Settings?.StartScript;
             if (string.IsNullOrEmpty(script))
             {
                 continue;
             }
-            string dir = Path.GetDirectoryName(script);
-            string venvPath = Path.GetFullPath($"{dir}/venv/Scripts/hipInfo.exe");
-            if (File.Exists(venvPath))
+            try
             {
-                return venvPath;
+                // Let SwarmUI's own resolver find python.exe — hipInfo.exe sits next to it.
+                ProcessStartInfo probe = new() { FileName = "python" };
+                NetworkBackendUtils.ConfigurePythonExeFor(script, "hipInfo-finder", probe, out _, out _);
+                string pythonDir = Path.GetDirectoryName(probe.FileName);
+                if (!string.IsNullOrEmpty(pythonDir))
+                {
+                    string hipInfoPath = Path.Combine(pythonDir, "hipInfo.exe");
+                    if (File.Exists(hipInfoPath))
+                    {
+                        return hipInfoPath;
+                    }
+                }
             }
-            string embedPath = Path.GetFullPath($"{dir}/../python_embeded/Scripts/hipInfo.exe");
-            if (File.Exists(embedPath))
+            catch
             {
-                return embedPath;
+                // ignore — try next backend or fall back to PATH
             }
         }
         return "hipInfo"; // fall back to PATH
