@@ -1,8 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using FreneticUtilities.FreneticExtensions;
 using SwarmUI.Accounts;
+using SwarmUI.Backends;
 using SwarmUI.Builtin_ComfyUIBackend;
 using SwarmUI.Core;
 using SwarmUI.Text2Image;
@@ -36,7 +40,281 @@ public static class SeedVR2DeviceUtils
     }
 
     /// <summary>
+    /// Lock protecting <see cref="_rocmCache"/>.
+    /// A lock (rather than Lazy) is used so transient failures can be retried on the next call.
+    /// </summary>
+    private static readonly object _rocmProbeLock = new();
+
+    /// <summary>
+    /// Cached ROCm GPU count. Null means not yet probed or last probe was transient (will retry after backoff).
+    /// Set to a non-null value only on definitive results: rocm-smi not installed, or successful probe.
+    /// </summary>
+    private static int? _rocmCache = null;
+
+    /// <summary>
+    /// Environment.TickCount64 value after which a transient failure may be retried.
+    /// Zero means no backoff is active.
+    /// </summary>
+    private static long _rocmRetryAfter = 0;
+
+    /// <summary>
+    /// Attempts to count AMD GPUs. Tries rocm-smi first (Linux); if rocm-smi is not installed,
+    /// falls back to hipInfo.exe (Windows HIP SDK). Returns 0 only if both tools are unavailable
+    /// or all probes fail. On ROCm/HIP systems, AMD GPUs are exposed to PyTorch as cuda:X devices.
+    /// Definitive results are cached permanently; transient failures apply a 60s backoff before retry.
+    /// </summary>
+    private static int CountRocmGpus()
+    {
+        lock (_rocmProbeLock)
+        {
+            if (_rocmCache.HasValue)
+            {
+                return _rocmCache.Value;
+            }
+            if (_rocmRetryAfter != 0 && Environment.TickCount64 < _rocmRetryAfter)
+            {
+                return 0; // backoff active — skip probe and return 0
+            }
+            (int count, bool permanent) = ProbeRocmGpuCount();
+            if (permanent)
+            {
+                _rocmCache = count;
+            }
+            else
+            {
+                _rocmRetryAfter = Environment.TickCount64 + 60_000; // retry in 60s
+            }
+            return count;
+        }
+    }
+
+    /// <summary>
+    /// Runs rocm-smi to count AMD GPUs. Returns (count, permanent) where permanent=true means
+    /// the result is definitive and should be cached; permanent=false means a transient failure
+    /// occurred and the caller should retry next time. If rocm-smi is not installed (ENOENT),
+    /// delegates to <see cref="ProbeHipInfoGpuCount"/> as a fallback before returning.
+    /// </summary>
+    private static (int Count, bool Permanent) ProbeRocmGpuCount()
+    {
+        const int BudgetMs = 5000;
+        Stopwatch sw = Stopwatch.StartNew();
+        Process p = null;
+        Task<string> stdoutTask = null;
+        Task stderrTask = null;
+        bool definitive = false;
+        try
+        {
+            ProcessStartInfo psi = new("rocm-smi", "--showid --csv")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            // Catch process-launch failures separately to distinguish "not installed" (permanent)
+            // from other launch errors like permission denied or transient env issues (transient).
+            // Win32Exception with NativeErrorCode 2 = ENOENT/ERROR_FILE_NOT_FOUND = not installed.
+            try { p = Process.Start(psi); }
+            catch (Win32Exception ex) when (ex.NativeErrorCode == 2) { return ProbeHipInfoGpuCount(); }  // rocm-smi absent — try hipInfo fallback
+            catch { return (0, false); }                                                                  // other launch error — transient
+            if (p is null)
+            {
+                return (0, true);
+            }
+            // Drain stdout and stderr concurrently to prevent pipe buffer deadlocks.
+            // Each wait uses the remaining fraction of the overall 5s budget.
+            stdoutTask = p.StandardOutput.ReadToEndAsync();
+            stderrTask = p.StandardError.ReadToEndAsync();
+            int ioRemaining = BudgetMs - (int)sw.ElapsedMilliseconds;
+            if (ioRemaining <= 0 || !Task.WhenAll(stdoutTask, stderrTask).Wait(ioRemaining))
+            {
+                return (0, false); // transient timeout — finally kills and observes tasks
+            }
+            int exitRemaining = BudgetMs - (int)sw.ElapsedMilliseconds;
+            if (exitRemaining <= 0 || !p.WaitForExit(exitRemaining))
+            {
+                return (0, false); // transient timeout — finally kills
+            }
+            if (p.ExitCode != 0)
+            {
+                return (0, false); // unexpected exit code — treat as transient
+            }
+            int count = 0;
+            bool firstLine = true;
+            foreach (string line in stdoutTask.Result.Split('\n'))
+            {
+                if (firstLine) { firstLine = false; continue; } // skip header
+                if (!string.IsNullOrWhiteSpace(line))
+                {
+                    count++;
+                }
+            }
+            definitive = true;
+            return (count, true); // clean result (including 0 GPUs) — cache permanently
+        }
+        catch
+        {
+            return (0, false); // unexpected exception — treat as transient
+        }
+        finally
+        {
+            if (!definitive && p is not null)
+            {
+                // Ensure the process is terminated on every non-success path, including exceptions.
+                // Disposing Process does not kill the child — explicit kill is required.
+                KillProcess(p);
+                // Observe in-flight read tasks so their exceptions don't go unobserved.
+                try { Task.WhenAll(stdoutTask ?? Task.CompletedTask, stderrTask ?? Task.CompletedTask).Wait(1000); } catch { }
+            }
+            p?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// On Windows, attempts to locate hipInfo.exe alongside the ComfyUI Python executable.
+    /// hipInfo.exe ships with the AMD HIP SDK and is placed in the same Scripts folder as python.exe.
+    /// Uses NetworkBackendUtils.ConfigurePythonExeFor (the same logic SwarmUI uses) to resolve
+    /// the Python executable path, then checks for hipInfo.exe next to it.
+    /// Falls back to a plain "hipInfo" PATH lookup if not found.
+    /// </summary>
+    private static string FindHipInfoPath()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return "hipInfo"; // Linux/macOS: rely on PATH
+        }
+        foreach (var backendData in Program.Backends.AllBackends.Values)
+        {
+            if (backendData?.AbstractBackend is not ComfyUISelfStartBackend backend)
+            {
+                continue;
+            }
+            string script = backend.Settings?.StartScript;
+            if (string.IsNullOrEmpty(script))
+            {
+                continue;
+            }
+            try
+            {
+                // Let SwarmUI's own resolver find python.exe — hipInfo.exe sits next to it.
+                ProcessStartInfo probe = new() { FileName = "python" };
+                NetworkBackendUtils.ConfigurePythonExeFor(script, "hipInfo-finder", probe, out _, out _);
+                string pythonDir = Path.GetDirectoryName(probe.FileName);
+                if (!string.IsNullOrEmpty(pythonDir))
+                {
+                    string hipInfoPath = Path.Combine(pythonDir, "hipInfo.exe");
+                    if (File.Exists(hipInfoPath))
+                    {
+                        return hipInfoPath;
+                    }
+                }
+            }
+            catch
+            {
+                // ignore — try next backend or fall back to PATH
+            }
+        }
+        return "hipInfo"; // fall back to PATH
+    }
+
+    /// <summary>
+    /// Fallback GPU probe using hipInfo.exe, which ships with the AMD HIP SDK for Windows.
+    /// Run with no arguments; counts output lines starting with "device#", one per GPU.
+    /// Example output line: "device#                           0"
+    /// Returns (count, permanent) using the same semantics as <see cref="ProbeRocmGpuCount"/>.
+    /// </summary>
+    private static (int Count, bool Permanent) ProbeHipInfoGpuCount()
+    {
+        const int BudgetMs = 5000;
+        Stopwatch sw = Stopwatch.StartNew();
+        Process p = null;
+        Task<string> stdoutTask = null;
+        Task stderrTask = null;
+        bool definitive = false;
+        try
+        {
+            string hipInfoExe = FindHipInfoPath();
+            ProcessStartInfo psi = new(hipInfoExe)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            try { p = Process.Start(psi); }
+            catch (Win32Exception ex) when (ex.NativeErrorCode == 2) { return (0, true); }  // hipInfo not installed — permanent
+            catch { return (0, false); }                                                      // other launch error — transient
+            if (p is null)
+            {
+                return (0, true);
+            }
+            stdoutTask = p.StandardOutput.ReadToEndAsync();
+            stderrTask = p.StandardError.ReadToEndAsync();
+            int ioRemaining = BudgetMs - (int)sw.ElapsedMilliseconds;
+            if (ioRemaining <= 0 || !Task.WhenAll(stdoutTask, stderrTask).Wait(ioRemaining))
+            {
+                return (0, false); // transient timeout
+            }
+            int exitRemaining = BudgetMs - (int)sw.ElapsedMilliseconds;
+            if (exitRemaining <= 0 || !p.WaitForExit(exitRemaining))
+            {
+                return (0, false); // transient timeout
+            }
+            if (p.ExitCode != 0)
+            {
+                return (0, false); // unexpected exit code — transient
+            }
+            int count = 0;
+            foreach (string line in stdoutTask.Result.Split('\n'))
+            {
+                if (line.TrimStart().StartsWith("device#", StringComparison.OrdinalIgnoreCase))
+                {
+                    count++;
+                }
+            }
+            definitive = true;
+            return (count, true);
+        }
+        catch
+        {
+            return (0, false);
+        }
+        finally
+        {
+            if (!definitive && p is not null)
+            {
+                KillProcess(p);
+                try { Task.WhenAll(stdoutTask ?? Task.CompletedTask, stderrTask ?? Task.CompletedTask).Wait(1000); } catch { }
+            }
+            p?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Kills a process safely, ignoring errors if it has already exited.
+    /// Uses a bounded wait after kill to avoid blocking indefinitely on processes
+    /// stuck in uninterruptible sleep.
+    /// </summary>
+    private static void KillProcess(Process p)
+    {
+        try
+        {
+            if (!p.HasExited)
+            {
+                p.Kill(entireProcessTree: true);
+                p.WaitForExit(2000); // bounded — process may linger in uninterruptible sleep
+            }
+        }
+        catch
+        {
+            // ignore — process may have exited between HasExited check and Kill
+        }
+    }
+
+    /// <summary>
     /// Local replica of SeedVR2's python get_device_list() behavior (memory_manager.get_device_list).
+    /// Detects NVIDIA GPUs (via nvidia-smi), or AMD ROCm GPUs (via rocm-smi) when no NVIDIA GPUs are present,
+    /// or Apple MPS on macOS. Mixed NVIDIA+AMD systems will only list NVIDIA devices.
     /// </summary>
     public static List<string> BuildLocalSeedVR2DeviceList()
     {
@@ -60,6 +338,21 @@ public static class SeedVR2DeviceUtils
         catch
         {
             // ignore
+        }
+
+        // ROCm: enumerate AMD GPUs (exposed as cuda:X in PyTorch)
+        // Only check if no NVIDIA GPUs were found (mixed setups are extremely rare)
+        if (!hasCuda)
+        {
+            int rocmCount = CountRocmGpus();
+            if (rocmCount > 0)
+            {
+                hasCuda = true;
+                for (int i = 0; i < rocmCount; i++)
+                {
+                    devs.Add($"cuda:{i}");
+                }
+            }
         }
 
         // MPS: best-effort detection (python checks torch.backends.mps.is_available()).
@@ -149,7 +442,7 @@ public static class SeedVR2DeviceUtils
 
     /// <summary>
     /// Returns the primary compute device for SeedVR2 model loading.
-    /// Prefers CUDA GPUs, then MPS on macOS, then falls back to CPU.
+    /// Prefers CUDA GPUs (NVIDIA or AMD ROCm, both exposed as cuda:X), then MPS on macOS, then falls back to CPU.
     /// </summary>
     public static string GetPrimaryComputeDevice()
     {
