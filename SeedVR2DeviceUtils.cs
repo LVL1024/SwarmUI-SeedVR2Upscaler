@@ -58,10 +58,10 @@ public static class SeedVR2DeviceUtils
     private static long _rocmRetryAfter = 0;
 
     /// <summary>
-    /// Attempts to count AMD GPUs via rocm-smi. Returns 0 if rocm-smi is unavailable or fails.
-    /// On ROCm systems, AMD GPUs are exposed to PyTorch as cuda:X devices, mirroring CUDA indexing.
-    /// Definitive results (rocm-smi absent, or successful probe) are cached permanently.
-    /// Transient failures (timeout, unexpected exit code) apply a 60s backoff before the next retry.
+    /// Attempts to count AMD GPUs. Tries rocm-smi first (Linux); if rocm-smi is not installed,
+    /// falls back to hipInfo.exe (Windows HIP SDK). Returns 0 only if both tools are unavailable
+    /// or all probes fail. On ROCm/HIP systems, AMD GPUs are exposed to PyTorch as cuda:X devices.
+    /// Definitive results are cached permanently; transient failures apply a 60s backoff before retry.
     /// </summary>
     private static int CountRocmGpus()
     {
@@ -90,8 +90,9 @@ public static class SeedVR2DeviceUtils
 
     /// <summary>
     /// Runs rocm-smi to count AMD GPUs. Returns (count, permanent) where permanent=true means
-    /// the result is definitive and should be cached (rocm-smi not installed, or clean success/0-GPU result);
-    /// permanent=false means a transient failure occurred and the caller should retry next time.
+    /// the result is definitive and should be cached; permanent=false means a transient failure
+    /// occurred and the caller should retry next time. If rocm-smi is not installed (ENOENT),
+    /// delegates to <see cref="ProbeHipInfoGpuCount"/> as a fallback before returning.
     /// </summary>
     private static (int Count, bool Permanent) ProbeRocmGpuCount()
     {
