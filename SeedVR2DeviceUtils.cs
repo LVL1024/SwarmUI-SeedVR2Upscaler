@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using FreneticUtilities.FreneticExtensions;
 using SwarmUI.Accounts;
+using SwarmUI.Backends;
 using SwarmUI.Builtin_ComfyUIBackend;
 using SwarmUI.Core;
 using SwarmUI.Text2Image;
@@ -181,8 +182,12 @@ public static class SeedVR2DeviceUtils
         {
             return "hipInfo"; // Linux/macOS: rely on PATH
         }
-        foreach (ComfyUISelfStartBackend backend in Program.Backends.RunningBackendsOfType<ComfyUISelfStartBackend>())
+        foreach (var backendData in Program.Backends.AllBackends.Values)
         {
+            if (backendData?.AbstractBackend is not ComfyUISelfStartBackend backend)
+            {
+                continue;
+            }
             string script = backend.Settings?.StartScript;
             if (string.IsNullOrEmpty(script))
             {
