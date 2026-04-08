@@ -433,7 +433,7 @@ public class SeedVR2UpscalerExtension : Extension
             "Enable torch.compile() for the DiT model.\n" +
             "Speeds up repeat runs after an initial compilation delay.\n" +
             "Requires Cache Model to be enabled so the compiled model persists between runs.\n" +
-            "Requires a CUDA GPU and PyTorch 2.0+.",
+            "Requires a torch.compile-capable backend such as CUDA/ROCm and PyTorch 2.0+.",
             "false",
             IsAdvanced: true,
             FeatureFlag: "seedvr2_upscaler",
@@ -812,7 +812,7 @@ public class SeedVR2UpscalerExtension : Extension
             ["cache_model"] = cacheModel,
             ["attention_mode"] = attentionMode
         };
-        if (g.UserInput.Get(SeedVR2TorchCompile, false))
+        if (cacheModel && g.UserInput.Get(SeedVR2TorchCompile, false))
         {
             string compileNode = g.CreateNode("SeedVR2TorchCompileSettings", new JObject()
             {
@@ -1160,7 +1160,7 @@ public class SeedVR2UpscalerExtension : Extension
             ["cache_model"] = cacheModel,
             ["attention_mode"] = attentionMode
         };
-        if (g.UserInput.Get(SeedVR2TorchCompile, false))
+        if (cacheModel && g.UserInput.Get(SeedVR2TorchCompile, false))
         {
             string compileNode = g.CreateNode("SeedVR2TorchCompileSettings", new JObject()
             {
@@ -1490,7 +1490,7 @@ public class SeedVR2UpscalerExtension : Extension
             ["cache_model"] = cacheModel,
             ["attention_mode"] = attentionMode
         };
-        if (g.UserInput.Get(SeedVR2TorchCompile, false))
+        if (cacheModel && g.UserInput.Get(SeedVR2TorchCompile, false))
         {
             string compileNode = g.CreateNode("SeedVR2TorchCompileSettings", new JObject()
             {
@@ -1761,7 +1761,7 @@ public class SeedVR2UpscalerExtension : Extension
             ["cache_model"] = cacheModel,
             ["attention_mode"] = attentionMode
         };
-        if (g.UserInput.Get(SeedVR2TorchCompile, false))
+        if (cacheModel && g.UserInput.Get(SeedVR2TorchCompile, false))
         {
             string compileNode = g.CreateNode("SeedVR2TorchCompileSettings", new JObject()
             {
