@@ -91,6 +91,9 @@ public class SeedVR2UpscalerExtension : Extension
     /// <summary>Registered parameter for SeedVR2 image blending method.</summary>
     public static T2IRegisteredParam<string> SeedVR2ImageBlendingMethod;
 
+    /// <summary>Registered parameter for enabling torch.compile() on the DiT model.</summary>
+    public static T2IRegisteredParam<bool> SeedVR2TorchCompile;
+
     /// <summary>Internal marker parameter indicating the image-upscaler subgroup is enabled.</summary>
     public static T2IRegisteredParam<bool> SeedVR2UseImageUpscalerNode;
 
@@ -423,6 +426,20 @@ public class SeedVR2UpscalerExtension : Extension
             FeatureFlag: "seedvr2_upscaler",
             Group: SeedVR2Group,
             OrderPriority: 10.05
+        ));
+
+        SeedVR2TorchCompile = T2IParamTypes.Register<bool>(new(
+            "SeedVR2 Torch Compile",
+            "Enable torch.compile() for the DiT model.\n" +
+            "Speeds up repeat runs after an initial compilation delay.\n" +
+            "Requires Cache Model to be enabled so the compiled model persists between runs.\n" +
+            "Requires a CUDA GPU and PyTorch 2.0+.",
+            "false",
+            IsAdvanced: true,
+            FeatureFlag: "seedvr2_upscaler",
+            Group: SeedVR2Group,
+            DependNonDefault: SeedVR2CacheModel.Type.ID,
+            OrderPriority: 10.15
         ));
 
         SeedVR2VAEOffloadDevice = T2IParamTypes.Register<string>(new(
@@ -795,6 +812,19 @@ public class SeedVR2UpscalerExtension : Extension
             ["cache_model"] = cacheModel,
             ["attention_mode"] = attentionMode
         };
+        if (g.UserInput.Get(SeedVR2TorchCompile, false))
+        {
+            string compileNode = g.CreateNode("SeedVR2TorchCompileSettings", new JObject()
+            {
+                ["backend"] = "inductor",
+                ["mode"] = "default",
+                ["fullgraph"] = false,
+                ["dynamic"] = false,
+                ["dynamo_cache_size_limit"] = 64,
+                ["dynamo_recompile_limit"] = 128
+            });
+            ditLoaderInputs["torch_compile_args"] = new JArray() { compileNode, 0 };
+        }
 
         // Add VRAM cleanup node to unload main generation model before SeedVR2
         // This frees up VRAM from the Flux model so SeedVR2 has enough room
@@ -1130,6 +1160,19 @@ public class SeedVR2UpscalerExtension : Extension
             ["cache_model"] = cacheModel,
             ["attention_mode"] = attentionMode
         };
+        if (g.UserInput.Get(SeedVR2TorchCompile, false))
+        {
+            string compileNode = g.CreateNode("SeedVR2TorchCompileSettings", new JObject()
+            {
+                ["backend"] = "inductor",
+                ["mode"] = "default",
+                ["fullgraph"] = false,
+                ["dynamic"] = false,
+                ["dynamo_cache_size_limit"] = 64,
+                ["dynamo_recompile_limit"] = 128
+            });
+            ditLoaderInputs["torch_compile_args"] = new JArray() { compileNode, 0 };
+        }
         string ditLoaderNode = g.CreateNode("SeedVR2LoadDiTModel", ditLoaderInputs);
 
         // 4. SeedVR2LoadVAEModel - load VAE with optional tiling
@@ -1447,6 +1490,19 @@ public class SeedVR2UpscalerExtension : Extension
             ["cache_model"] = cacheModel,
             ["attention_mode"] = attentionMode
         };
+        if (g.UserInput.Get(SeedVR2TorchCompile, false))
+        {
+            string compileNode = g.CreateNode("SeedVR2TorchCompileSettings", new JObject()
+            {
+                ["backend"] = "inductor",
+                ["mode"] = "default",
+                ["fullgraph"] = false,
+                ["dynamic"] = false,
+                ["dynamo_cache_size_limit"] = 64,
+                ["dynamo_recompile_limit"] = 128
+            });
+            ditLoaderInputs["torch_compile_args"] = new JArray() { compileNode, 0 };
+        }
         string ditLoaderNode = g.CreateNode("SeedVR2LoadDiTModel", ditLoaderInputs);
 
         // 4. SeedVR2LoadVAEModel - load VAE with optional tiling
@@ -1705,6 +1761,19 @@ public class SeedVR2UpscalerExtension : Extension
             ["cache_model"] = cacheModel,
             ["attention_mode"] = attentionMode
         };
+        if (g.UserInput.Get(SeedVR2TorchCompile, false))
+        {
+            string compileNode = g.CreateNode("SeedVR2TorchCompileSettings", new JObject()
+            {
+                ["backend"] = "inductor",
+                ["mode"] = "default",
+                ["fullgraph"] = false,
+                ["dynamic"] = false,
+                ["dynamo_cache_size_limit"] = 64,
+                ["dynamo_recompile_limit"] = 128
+            });
+            ditLoaderInputs["torch_compile_args"] = new JArray() { compileNode, 0 };
+        }
         string ditLoaderNode = g.CreateNode("SeedVR2LoadDiTModel", ditLoaderInputs);
 
         // Create SeedVR2LoadVAEModel node
@@ -1879,7 +1948,7 @@ public class SeedVR2UpscalerExtension : Extension
         "seedvrmodel", "seedvrupscaleby", "seedvrresolution", "seedvrblockswap",
         "seedvrcolorcorrection", "seedvrstepmode", "seedvrtwostepmode", "seedvrpredownscale", "seedvrtiledvae",
         "seedvrlatentnoise", "seedvrinputnoise", "seedvrlatentnoisescale", "seedvrinputnoisescale", "seedvrcontrolaftergenerate",
-        "seedvrcachemodel", "seedvrattentionmode",
+        "seedvrcachemodel", "seedvrattentionmode", "seedvrtorchcompile",
         "seedvrimagetilesize", "seedvrimagemaskblur", "seedvrimagetileoverlap", "seedvrtilepadding", "seedvrimagetileupscaleresolution",
         "seedvrimageblendingmethod", "seedvrimagetilingstrategy", "seedvrimageantialiasingstrength",
         "seedvrvaeoffloaddevice", "seedvrvideobatchsize", "seedvrtemporaloverlap", "seedvruniformbatchsize",
