@@ -564,69 +564,85 @@ public class SeedVR2UpscalerExtension : Extension
     }
 
     /// <summary>Detects available GPU VRAM and returns the best model configuration.</summary>
-    /// <returns>Tuple of (modelKey, blockSwap, tiledVAE) based on detected VRAM.</returns>
-    public static (string ModelKey, int BlockSwap, bool TiledVAE) DetectVRAMAndSelectModel()
-    {
-        try
-        {
-            NvidiaUtil.NvidiaInfo[] gpus = NvidiaUtil.QueryNvidia();
-            if (gpus is null || gpus.Length == 0)
-            {
-                Logs.Warning("SeedVR2 Auto: Could not detect GPU VRAM, defaulting to 3B FP8 with block swap");
-                return ("seedvr2-3b-fp8", 16, true);
-            }
+	/// <returns>Tuple of (modelKey, blockSwap, tiledVAE) based on detected VRAM.</returns>
+	public static (string ModelKey, int BlockSwap, bool TiledVAE) DetectVRAMAndSelectModel()
+	{
+		try
+		{
+			// Try NVIDIA first
+			NvidiaUtil.NvidiaInfo[] gpus = NvidiaUtil.QueryNvidia();
+			if (gpus is not null && gpus.Length > 0)
+			{
+				// Use the GPU with most VRAM
+				NvidiaUtil.NvidiaInfo bestGpu = gpus.OrderByDescending(g => g.TotalMemory.InBytes).First();
+				double vramGiB = bestGpu.TotalMemory.GiB;
 
-            // Use the GPU with most VRAM
-            NvidiaUtil.NvidiaInfo bestGpu = gpus.OrderByDescending(g => g.TotalMemory.InBytes).First();
-            double vramGiB = bestGpu.TotalMemory.GiB;
+				Logs.Info($"SeedVR2 Auto: Detected NVIDIA GPU '{bestGpu.GPUName}' with {vramGiB:F1} GiB VRAM");
+				return SelectModelByVram(vramGiB);
+			}
 
-            Logs.Info($"SeedVR2 Auto: Detected GPU '{bestGpu.GPUName}' with {vramGiB:F1} GiB VRAM");
+			// If no NVIDIA GPUs found, try AMD/ROCm
+			double? amdVram = SeedVR2DeviceUtils.DetectAmdVramGiB();
+			if (amdVram.HasValue)
+			{
+				double vramGiB = amdVram.Value;
+				Logs.Info($"SeedVR2 Auto: Detected AMD GPU with {vramGiB:F1} GiB VRAM");
+				return SelectModelByVram(vramGiB);
+			}
 
-            // Select model based on VRAM thresholds
-            // Note: These are conservative estimates accounting for base model already loaded
-            if (vramGiB >= 24)
-            {
-                // 24GB+: Can run 7B Sharp FP16 without block swap
-                Logs.Info("SeedVR2 Auto: Selected 7B Sharp FP16 (max quality)");
-                return ("seedvr2-7b-sharp-fp16", 0, false);
-            }
-            else if (vramGiB >= 20)
-            {
-                // 20-24GB: 7B FP8 with light block swap
-                Logs.Info("SeedVR2 Auto: Selected 7B FP8 with block swap 8");
-                return ("seedvr2-7b-fp8", 8, false);
-            }
-            else if (vramGiB >= 16)
-            {
-                // 16-20GB: 7B Q4 or 3B FP16 with block swap
-                Logs.Info("SeedVR2 Auto: Selected 7B Q4 with block swap 16");
-                return ("seedvr2-7b-q4", 16, true);
-            }
-            else if (vramGiB >= 12)
-            {
-                // 12-16GB: 3B FP8 with moderate block swap
-                Logs.Info("SeedVR2 Auto: Selected 3B FP8 with block swap 12");
-                return ("seedvr2-3b-fp8", 12, true);
-            }
-            else if (vramGiB >= 8)
-            {
-                // 8-12GB: 3B Q4 with heavy block swap
-                Logs.Info("SeedVR2 Auto: Selected 3B Q4 with block swap 20");
-                return ("seedvr2-3b-q4", 20, true);
-            }
-            else
-            {
-                // <8GB: 3B Q4 with maximum block swap, tiled VAE
-                Logs.Warning($"SeedVR2 Auto: Low VRAM ({vramGiB:F1} GiB) - using 3B Q4 with maximum optimization");
-                return ("seedvr2-3b-q4", 28, true);
-            }
-        }
-        catch (Exception ex)
-        {
-            Logs.Warning($"SeedVR2 Auto: Error detecting VRAM: {ex.Message}, defaulting to 3B FP8");
-            return ("seedvr2-3b-fp8", 16, true);
-        }
-    }
+			// If both failed, fall back to default
+			Logs.Warning("SeedVR2 Auto: Could not detect GPU VRAM (no NVIDIA or AMD GPUs found), defaulting to 3B FP8");
+			return ("seedvr2-3b-fp8", 16, true);
+		}
+		catch (Exception ex)
+		{
+			Logs.Warning($"SeedVR2 Auto: Error detecting VRAM: {ex.Message}, defaulting to 3B FP8");
+			return ("seedvr2-3b-fp8", 16, true);
+		}
+	}
+
+	/// <summary>Selects model configuration based on VRAM amount. Shared logic for NVIDIA and AMD.</summary>
+	private static (string ModelKey, int BlockSwap, bool TiledVAE) SelectModelByVram(double vramGiB)
+	{
+		// Select model based on VRAM thresholds
+		// Note: These are conservative estimates accounting for base model already loaded
+		if (vramGiB >= 24)
+		{
+			// 24GB+: Can run 7B Sharp FP16 without block swap
+			Logs.Info("SeedVR2 Auto: Selected 7B Sharp FP16 (max quality)");
+			return ("seedvr2-7b-sharp-fp16", 0, false);
+		}
+		else if (vramGiB >= 20)
+		{
+			// 20-24GB: 7B FP8 with light block swap
+			Logs.Info("SeedVR2 Auto: Selected 7B FP8 with block swap 8");
+			return ("seedvr2-7b-fp8", 8, false);
+		}
+		else if (vramGiB >= 16)
+		{
+			// 16-20GB: 7B Q4 or 3B FP16 with block swap
+			Logs.Info("SeedVR2 Auto: Selected 7B Q4 with block swap 16");
+			return ("seedvr2-7b-q4", 16, true);
+		}
+		else if (vramGiB >= 12)
+		{
+			// 12-16GB: 3B FP8 with moderate block swap
+			Logs.Info("SeedVR2 Auto: Selected 3B FP8 with block swap 12");
+			return ("seedvr2-3b-fp8", 12, true);
+		}
+		else if (vramGiB >= 8)
+		{
+			// 8-12GB: 3B Q4 with heavy block swap
+			Logs.Info("SeedVR2 Auto: Selected 3B Q4 with block swap 20");
+			return ("seedvr2-3b-q4", 20, true);
+		}
+		else
+		{
+			// <8GB: 3B Q4 with maximum block swap, tiled VAE
+			Logs.Warning($"SeedVR2 Auto: Low VRAM ({vramGiB:F1} GiB) - using 3B Q4 with maximum optimization");
+			return ("seedvr2-3b-q4", 28, true);
+		}
+	}
 
     /// <summary>Returns true if the current generation request is producing video output.</summary>
     private static bool IsSeedVR2VideoGenerationRequest(WorkflowGenerator g)
