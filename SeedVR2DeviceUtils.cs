@@ -40,7 +40,7 @@ public static class SeedVR2DeviceUtils
     }
 
     /// <summary>
-    /// Lock protecting <see cref="_rocmCache"/>.
+    /// Lock protecting <see cref="_rocmCache"/> and <see cref="_amdVramCache"/>.
     /// A lock (rather than Lazy) is used so transient failures can be retried on the next call.
     /// </summary>
     private static readonly object _rocmProbeLock = new();
@@ -56,6 +56,16 @@ public static class SeedVR2DeviceUtils
     /// Zero means no backoff is active.
     /// </summary>
     private static long _rocmRetryAfter = 0;
+
+    /// <summary>
+    /// Cached AMD VRAM amount in GiB. Null means not yet probed or last probe was transient.
+    /// </summary>
+    private static double? _amdVramCache = null;
+
+    /// <summary>
+    /// Environment.TickCount64 value after which a transient AMD VRAM failure may be retried.
+    /// </summary>
+    private static long _amdVramRetryAfter = 0;
 
     /// <summary>
     /// Attempts to count AMD GPUs. Tries rocm-smi first (Linux); if rocm-smi is not installed,
@@ -278,6 +288,206 @@ public static class SeedVR2DeviceUtils
         catch
         {
             return (0, false);
+        }
+        finally
+        {
+            if (!definitive && p is not null)
+            {
+                KillProcess(p);
+                try { Task.WhenAll(stdoutTask ?? Task.CompletedTask, stderrTask ?? Task.CompletedTask).Wait(1000); } catch { }
+            }
+            p?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Attempts to detect AMD GPU VRAM in GiB using hipInfo.exe (Windows HIP SDK) or rocm-smi (Linux).
+    /// Returns null if AMD tools are unavailable or detection fails.
+    /// Result is cached after successful detection; transient failures apply a 60s backoff.
+    /// </summary>
+    public static double? DetectAmdVramGiB()
+    {
+        lock (_rocmProbeLock)
+        {
+            if (_amdVramCache.HasValue)
+            {
+                return _amdVramCache.Value;
+            }
+            if (_amdVramRetryAfter != 0 && Environment.TickCount64 < _amdVramRetryAfter)
+            {
+                return null; // backoff active
+            }
+
+            double? result = OperatingSystem.IsWindows()
+                ? ProbeHipInfoVramGiB()
+                : ProbeRocmSmiVramGiB();
+
+            if (result.HasValue)
+            {
+                _amdVramCache = result;
+            }
+            else
+            {
+                _amdVramRetryAfter = Environment.TickCount64 + 60_000; // retry in 60s
+            }
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// Windows: queries hipInfo.exe for total GPU memory.
+    /// Parses lines of the form "memInfo.total: 19.98 GB" or "totalGlobalMem: 19.98 GB".
+    /// Returns the largest value found across all devices, or null on failure.
+    /// </summary>
+    private static double? ProbeHipInfoVramGiB()
+    {
+        const int BudgetMs = 5000;
+        Stopwatch sw = Stopwatch.StartNew();
+        Process p = null;
+        Task<string> stdoutTask = null;
+        Task stderrTask = null;
+        bool definitive = false;
+        try
+        {
+            string hipInfoExe = FindHipInfoPath();
+            ProcessStartInfo psi = new(hipInfoExe)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            try { p = Process.Start(psi); }
+            catch (Win32Exception ex) when (ex.NativeErrorCode == 2) { return null; } // hipInfo not installed — permanent
+            catch { return null; }                                                      // other launch error — transient
+            if (p is null)
+            {
+                return null;
+            }
+            // Drain stdout and stderr concurrently to prevent pipe buffer deadlocks.
+            stdoutTask = p.StandardOutput.ReadToEndAsync();
+            stderrTask = p.StandardError.ReadToEndAsync();
+            int ioRemaining = BudgetMs - (int)sw.ElapsedMilliseconds;
+            if (ioRemaining <= 0 || !Task.WhenAll(stdoutTask, stderrTask).Wait(ioRemaining))
+            {
+                return null; // transient timeout
+            }
+            int exitRemaining = BudgetMs - (int)sw.ElapsedMilliseconds;
+            if (exitRemaining <= 0 || !p.WaitForExit(exitRemaining))
+            {
+                return null; // transient timeout
+            }
+            if (p.ExitCode != 0)
+            {
+                return null;
+            }
+            double maxVram = 0;
+            foreach (string line in stdoutTask.Result.Split('\n'))
+            {
+                string trimmed = line.Trim();
+                if (!trimmed.StartsWith("memInfo.total:", StringComparison.OrdinalIgnoreCase) &&
+                    !trimmed.StartsWith("totalGlobalMem:", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                string[] parts = trimmed.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    if (parts[i].Equals("GB", StringComparison.OrdinalIgnoreCase) && i > 0)
+                    {
+                        string numberStr = parts[i - 1].TrimEnd(',', ':', ';');
+                        if (double.TryParse(numberStr, System.Globalization.NumberStyles.Any,
+                            System.Globalization.CultureInfo.InvariantCulture, out double gib) && gib > maxVram)
+                        {
+                            maxVram = gib;
+                        }
+                        break;
+                    }
+                }
+            }
+            definitive = true;
+            return maxVram > 0 ? maxVram : null;
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            if (!definitive && p is not null)
+            {
+                KillProcess(p);
+                try { Task.WhenAll(stdoutTask ?? Task.CompletedTask, stderrTask ?? Task.CompletedTask).Wait(1000); } catch { }
+            }
+            p?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Linux: queries rocm-smi for total VRAM across all AMD GPUs.
+    /// Returns the largest value found, or null if rocm-smi is unavailable or the probe fails.
+    /// </summary>
+    private static double? ProbeRocmSmiVramGiB()
+    {
+        const int BudgetMs = 5000;
+        Stopwatch sw = Stopwatch.StartNew();
+        Process p = null;
+        Task<string> stdoutTask = null;
+        Task stderrTask = null;
+        bool definitive = false;
+        try
+        {
+            ProcessStartInfo psi = new("rocm-smi", "--showmeminfo vram --csv")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            try { p = Process.Start(psi); }
+            catch (Win32Exception ex) when (ex.NativeErrorCode == 2) { return null; } // rocm-smi not installed — permanent
+            catch { return null; }
+            if (p is null)
+            {
+                return null;
+            }
+            stdoutTask = p.StandardOutput.ReadToEndAsync();
+            stderrTask = p.StandardError.ReadToEndAsync();
+            int ioRemaining = BudgetMs - (int)sw.ElapsedMilliseconds;
+            if (ioRemaining <= 0 || !Task.WhenAll(stdoutTask, stderrTask).Wait(ioRemaining))
+            {
+                return null;
+            }
+            int exitRemaining = BudgetMs - (int)sw.ElapsedMilliseconds;
+            if (exitRemaining <= 0 || !p.WaitForExit(exitRemaining))
+            {
+                return null;
+            }
+            if (p.ExitCode != 0)
+            {
+                return null;
+            }
+            double maxVram = 0;
+            bool firstLine = true;
+            foreach (string line in stdoutTask.Result.Split('\n'))
+            {
+                if (firstLine) { firstLine = false; continue; } // skip header
+                string[] parts = line.Split(',');
+                if (parts.Length >= 2 && long.TryParse(parts[1].Trim(), out long bytes))
+                {
+                    double gib = bytes / (1024.0 * 1024.0 * 1024.0);
+                    if (gib > maxVram)
+                    {
+                        maxVram = gib;
+                    }
+                }
+            }
+            definitive = true;
+            return maxVram > 0 ? maxVram : null;
+        }
+        catch
+        {
+            return null;
         }
         finally
         {
