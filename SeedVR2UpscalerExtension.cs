@@ -371,6 +371,7 @@ public class SeedVR2UpscalerExtension : Extension
             "Enable tiled VAE encoding/decoding for large images.\nReduces VRAM usage but may be slightly slower.\nNote: Presets auto-configure this value.",
             "false",
             IsAdvanced: true,
+			Toggleable: true,
             FeatureFlag: "seedvr2_upscaler",
             Group: SeedVR2Group,
             OrderPriority: 6
