@@ -100,7 +100,7 @@ addInstallButton('seedvrupscaler', 'seedvr2_image_upscaler', 'seedvr2_image_upsc
                                             if (metadataParsed.sui_image_params) {
                                                 // Params to skip - not used in file upscaling or could cause validation errors
                                                 let skipParams = [
-                                                    'model', 'refinermodel', 'videomodel', 'videoswapmodel', 'loras', 'loraweights',  // Models may not exist
+                                                    'model', 'refinermodel', 'videomodel', 'videoswapmodel', 'loras', 'loraweights', 'loratencweights'  // Models may not exist
                                                     'images', 'swarm_version',  // Special params
                                                     'width', 'height', 'aspectratio', 'sidelength'  // Resolution comes from source image
                                                 ];
