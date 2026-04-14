@@ -79,6 +79,11 @@ addInstallButton('seedvrupscaler', 'seedvr2_image_upscaler', 'seedvr2_image_upsc
                                 for (let paramId of seedvr2Params) {
                                     let elem = document.getElementById('input_' + paramId);
                                     if (elem) {
+                                        // Skip toggleable params whose toggle is off (same logic as simpletab.js)
+                                        let toggleElem = document.getElementById('input_' + paramId + '_toggle');
+                                        if (toggleElem && !toggleElem.checked) {
+                                            continue;
+                                        }
                                         let val = typeof getInputVal === 'function' ? getInputVal(elem, true) : elem.value;
                                         if (val != null && val !== '') {
                                             input_overrides[paramId] = val;
