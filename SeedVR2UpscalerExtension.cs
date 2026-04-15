@@ -1977,7 +1977,7 @@ public class SeedVR2UpscalerExtension : Extension
     private static readonly HashSet<string> SkipSourceMetadataParams =
     [
         // Model params - may reference models that no longer exist (fixes issue #13)
-        "model", "refinermodel", "loras", "loraweights", "loratencweights",
+        "model", "refinermodel", "videomodel", "videoswapmodel", "loras", "loraweights", "loratencweights",
         // Resolution params - determined by source image, not original generation
         "width", "height", "aspectratio", "sidelength", "altresolutionheightmult", "rawresolution",
         // Backend params - not relevant for file upscaling
